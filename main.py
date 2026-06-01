@@ -18,4 +18,11 @@ if __name__ == "__main__":
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
     app = WinForgeApp()
+    try:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "icon.ico")
+        if not os.path.exists(icon_path) and hasattr(sys, '_MEIPASS'):
+            icon_path = os.path.join(sys._MEIPASS, "icon.ico")
+        if os.path.exists(icon_path):
+            app.iconbitmap(icon_path)
+    except: pass
     app.mainloop()

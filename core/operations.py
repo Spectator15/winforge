@@ -570,13 +570,34 @@ def get_system_info(cb=None):
     $info["ram_type"] = $typeStr
     $info["ram_sticks"] = "$sticks stick(s)"
 
-    # GPU
+    # GPU (registry method for accurate VRAM on modern GPUs)
     $gpus = Get-CimInstance Win32_VideoController
     $gpuList = @()
     foreach ($g in $gpus) {
-        $vram = [math]::Round($g.AdapterRAM / 1GB, 1)
-        if ($vram -le 0) { $vram = "Shared" } else { $vram = "$vram GB" }
-        $gpuList += "$($g.Name) ($vram)"
+        # AdapterRAM is 32-bit and caps at 4GB. Use registry for real VRAM.
+        $vram = $null
+        try {
+            $regPath = "HKLM:\SYSTEM\ControlSet001\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10135}"
+            Get-ChildItem $regPath -EA SilentlyContinue | ForEach-Object {
+                $desc = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).DriverDesc
+                if ($desc -eq $g.Name) {
+                    $qw = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).HardwareInformation.qwMemorySize
+                    if ($qw) { $vram = [math]::Round([uint64]$qw / 1GB, 0) }
+                    if (!$vram) {
+                        $adMem = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).HardwareInformation.AdapterString
+                        $dedVid = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).'HardwareInformation.MemorySize'
+                        if ($dedVid) { $vram = [math]::Round([uint64]("0x" + [System.BitConverter]::ToString($dedVid[7..0]).Replace("-","")) / 1GB, 0) }
+                    }
+                }
+            }
+        } catch {}
+        if (!$vram -or $vram -le 0) {
+            # Fallback to AdapterRAM
+            $raw = $g.AdapterRAM
+            if ($raw -gt 0) { $vram = [math]::Round($raw / 1GB, 0) } else { $vram = $null }
+        }
+        $vramStr = if ($vram -and $vram -gt 0) { "$vram GB" } else { "Shared" }
+        $gpuList += "$($g.Name) ($vramStr)"
     }
     $info["gpu"] = $gpuList -join " | "
     $info["gpu_driver"] = ($gpus | Select-Object -First 1).DriverVersion

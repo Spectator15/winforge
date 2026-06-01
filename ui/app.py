@@ -74,18 +74,47 @@ class WinForgeApp(ctk.CTk):
             text_color=TXT3).grid(row=15,column=0,padx=16,pady=12,sticky="sw")
 
     def _build_log(self):
-        lf=ctk.CTkFrame(self._main,fg_color=PANEL,corner_radius=8)
-        lf.grid(row=2,column=0,sticky="ew",padx=12,pady=(0,10)); lf.grid_columnconfigure(0,weight=1)
-        h=ctk.CTkFrame(lf,fg_color="transparent"); h.grid(row=0,column=0,sticky="ew",padx=10,pady=(6,0))
-        h.grid_columnconfigure(1,weight=1)
-        ctk.CTkLabel(h,text="Output Log",font=ctk.CTkFont(family=FONT,size=11,weight="bold"),text_color=TXT2).grid(row=0,column=0,sticky="w")
-        ctk.CTkButton(h,text="Clear",width=50,height=20,font=ctk.CTkFont(family=FONT,size=10),
-            fg_color=CARD,hover_color=HOVER,text_color=TXT3,corner_radius=5,command=self._clog).grid(row=0,column=2,sticky="e")
-        self._logbox=ctk.CTkTextbox(lf,height=130,font=ctk.CTkFont(family=MONO,size=11),
-            fg_color=BG,text_color=TXT,corner_radius=6,wrap="word",state="disabled")
-        self._logbox.grid(row=1,column=0,sticky="ew",padx=6,pady=6)
-        self._logbox.tag_config("ok",foreground=OK); self._logbox.tag_config("warn",foreground=WARN)
-        self._logbox.tag_config("err",foreground=DANGER); self._logbox.tag_config("info",foreground=ACCENT)
+        self._log_visible = True
+        self._log_frame = ctk.CTkFrame(self._main, fg_color=PANEL, corner_radius=8)
+        self._log_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0,10))
+        self._log_frame.grid_columnconfigure(0, weight=1)
+
+        h = ctk.CTkFrame(self._log_frame, fg_color="transparent")
+        h.grid(row=0, column=0, sticky="ew", padx=10, pady=(6,0))
+        h.grid_columnconfigure(1, weight=1)
+
+        self._log_toggle = ctk.CTkButton(h, text="▼ Output Log", width=120, height=22,
+            font=ctk.CTkFont(family=FONT, size=11, weight="bold"), fg_color="transparent",
+            hover_color=HOVER, text_color=TXT2, corner_radius=5, anchor="w",
+            command=self._toggle_log)
+        self._log_toggle.grid(row=0, column=0, sticky="w")
+
+        ctk.CTkButton(h, text="Clear", width=50, height=20,
+            font=ctk.CTkFont(family=FONT, size=10), fg_color=CARD, hover_color=HOVER,
+            text_color=TXT3, corner_radius=5, command=self._clog).grid(row=0, column=2, sticky="e")
+
+        self._logbox = ctk.CTkTextbox(self._log_frame, height=130,
+            font=ctk.CTkFont(family=MONO, size=11), fg_color=BG, text_color=TXT,
+            corner_radius=6, wrap="word", state="disabled")
+        self._logbox.grid(row=1, column=0, sticky="ew", padx=6, pady=6)
+        self._logbox.tag_config("ok", foreground=OK)
+        self._logbox.tag_config("warn", foreground=WARN)
+        self._logbox.tag_config("err", foreground=DANGER)
+        self._logbox.tag_config("info", foreground=ACCENT)
+
+        # Toast container (bottom right)
+        self._toast_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._toast_frame.place(relx=1.0, rely=1.0, anchor="se", x=-20, y=-20)
+        self._toasts = []
+
+    def _toggle_log(self):
+        if self._log_visible:
+            self._logbox.grid_remove()
+            self._log_toggle.configure(text="▶ Output Log")
+        else:
+            self._logbox.grid()
+            self._log_toggle.configure(text="▼ Output Log")
+        self._log_visible = not self._log_visible
 
     def _log(self,msg):
         def w():
@@ -96,9 +125,38 @@ class WinForgeApp(ctk.CTk):
                 "info" if "[INFO]" in msg else None
             self._logbox.insert("end",f"[{ts}] {msg}\n",tag if tag else ())
             self._logbox.see("end"); self._logbox.configure(state="disabled")
+            # Trigger toast on completion messages
+            if tag == "ok" and any(x in msg for x in ["complete","applied","removed","installed","cleaned","created","copied","reset","configured","debloated"]):
+                clean_msg = msg.replace("[OK] ","").strip()
+                self._show_toast(clean_msg, OK)
+            elif tag == "warn" and "[WARN]" in msg:
+                clean_msg = msg.replace("[WARN] ","").strip()
+                self._show_toast(clean_msg, WARN)
         self.after(0,w)
     def _clog(self):
         self._logbox.configure(state="normal"); self._logbox.delete("1.0","end"); self._logbox.configure(state="disabled")
+
+    def _show_toast(self, msg, color=OK):
+        """Show a notification toast at bottom-right that fades after 5 seconds."""
+        toast = ctk.CTkFrame(self._toast_frame, fg_color=CARD2, corner_radius=8,
+                             border_width=1, border_color=color)
+        toast.pack(side="bottom", anchor="e", pady=3, padx=0)
+
+        bar = ctk.CTkFrame(toast, fg_color=color, width=4, corner_radius=2)
+        bar.pack(side="left", fill="y", padx=(0,0))
+
+        ctk.CTkLabel(toast, text=msg, font=ctk.CTkFont(family=FONT, size=11),
+                     text_color=TXT, wraplength=300, justify="left").pack(side="left", padx=(8,12), pady=8)
+
+        self._toasts.append(toast)
+        self.after(5000, lambda t=toast: self._dismiss_toast(t))
+
+    def _dismiss_toast(self, toast):
+        try:
+            toast.destroy()
+            if toast in self._toasts:
+                self._toasts.remove(toast)
+        except: pass
 
     def _go(self,tid):
         for t in self._tips: t._c(); t._h()
