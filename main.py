@@ -874,7 +874,7 @@ relaunch_as_admin()
 class WinForge(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("WinForge — Windows Toolkit by Danish")
+        self.title("WinForge — Windows Toolkit")
         self.geometry("1100x750")
         self.minsize(900, 600)
         self.configure(fg_color=BG)
@@ -909,32 +909,30 @@ class WinForge(ctk.CTk):
     def _build_nav(self):
         ctk.CTkLabel(self._sidebar, text="WinForge",
             font=ctk.CTkFont(family=FONT, size=20, weight="bold"),
-            text_color=ACCENT).grid(row=0, column=0, padx=16, pady=(18,2), sticky="w")
-        ctk.CTkLabel(self._sidebar, text="by Danish",
-            font=ctk.CTkFont(family=FONT, size=11), text_color=TEXT3
-            ).grid(row=1, column=0, padx=16, pady=(0,14), sticky="w")
+            text_color=ACCENT).grid(row=0, column=0, padx=16, pady=(18,14), sticky="w")
+
 
         self._nav_btns = {}
         tabs = [
-            ("System Info",   "💻"),
-            ("Repair",        "🔧"),
-            ("Cleanup",       "🧹"),
-            ("Dependencies",  "📦"),
-            ("Install Apps",  "⬇️"),
-            ("Tweaks & Debloat","⚙️"),
-            ("DNS Settings",  "🌐"),
-            ("Win Updates",   "🔄"),
-            ("Registry Health","🗂️"),
-            ("System Tools",  "🛠️"),
-            ("Restore Points","💾"),
+            "System Info",
+            "Repair",
+            "Cleanup",
+            "Dependencies",
+            "Install Apps",
+            "Tweaks & Debloat",
+            "DNS Settings",
+            "Win Updates",
+            "Registry Health",
+            "System Tools",
+            "Restore Points",
         ]
-        for i, (name, icon) in enumerate(tabs):
-            btn = ctk.CTkButton(self._sidebar, text=f"  {icon}  {name}",
+        for i, name in enumerate(tabs):
+            btn = ctk.CTkButton(self._sidebar, text=name,
                 font=ctk.CTkFont(family=FONT, size=12), anchor="w",
                 fg_color="transparent", hover_color=HOVER, text_color=TEXT2,
-                corner_radius=6, height=36,
+                corner_radius=6, height=34,
                 command=lambda n=name: self._show_tab(n))
-            btn.grid(row=i+2, column=0, padx=8, pady=2, sticky="ew")
+            btn.grid(row=i+1, column=0, padx=8, pady=1, sticky="ew")
             self._nav_btns[name] = btn
 
     def _build_log(self):
@@ -981,10 +979,9 @@ class WinForge(ctk.CTk):
             self._log_toggle_btn.configure(text="▶  Output Log")
 
     def _build_toast_area(self):
-        # Overlay frame anchored to bottom-right of main area
-        self._toast_overlay = ctk.CTkFrame(self._main, fg_color="transparent", width=340)
-        self._toast_overlay.grid(row=0, column=0, rowspan=3, sticky="se", padx=16, pady=16)
-        self._toast_overlay.grid_propagate(False)
+        # Use place() so toasts always float above content regardless of grid rows
+        self._toast_overlay = ctk.CTkFrame(self, fg_color="transparent", width=360)
+        self._toast_overlay.place(relx=1.0, rely=1.0, anchor="se", x=-20, y=-20)
         self._toast_overlay.lift()
 
     def _log_line(self, msg: str):
@@ -1019,55 +1016,70 @@ class WinForge(ctk.CTk):
 
     # ─── Toast notifications ─────────────────────────────────────
     def _show_toast(self, message: str, kind: str = "ok"):
-        # Strip log prefix for display
         clean = message
         for prefix in ["[OK] ", "[WARN] ", "[ERROR] ", "[INFO] "]:
             clean = clean.replace(prefix, "")
-        clean = clean[:80] + ("..." if len(clean) > 80 else "")
+        if len(clean) > 72:
+            clean = clean[:72] + "..."
 
         color = SUCCESS if kind == "ok" else WARN if kind == "warn" else DANGER
-
-        # Toast container
-        toast = ctk.CTkFrame(self._toast_overlay, fg_color=CARD2, corner_radius=8,
-                             border_width=1, border_color=color)
-        toast.pack(side="bottom", anchor="e", pady=3, fill="x")
-        toast.grid_columnconfigure(1, weight=1)
-
-        # Colored accent bar
-        bar = ctk.CTkFrame(toast, fg_color=color, width=4, corner_radius=2)
-        bar.grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 0), pady=0)
-
-        # Icon
-        icon = "✓" if kind == "ok" else "⚠" if kind == "warn" else "✗"
-        ctk.CTkLabel(toast, text=icon, font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
-                     text_color=color, width=22).grid(row=0, column=1, padx=(8, 0), pady=(8, 0), sticky="nw")
-
-        # Title
+        icon  = "✓" if kind == "ok" else "⚠" if kind == "warn" else "✗"
         title = "Done" if kind == "ok" else "Warning" if kind == "warn" else "Error"
-        ctk.CTkLabel(toast, text=title, font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
-                     text_color=TEXT).grid(row=0, column=2, padx=(4, 40), pady=(8, 0), sticky="w")
 
-        # Message
-        ctk.CTkLabel(toast, text=clean, font=ctk.CTkFont(family=FONT, size=10),
-                     text_color=TEXT2, wraplength=260, justify="left"
-                     ).grid(row=1, column=1, columnspan=2, padx=(8, 40), pady=(0, 8), sticky="w")
+        # Build toast as a toplevel-style frame placed via place() on root window
+        toast = ctk.CTkFrame(self, fg_color=CARD2, corner_radius=8,
+                             border_width=1, border_color=color)
 
-        # Close button
-        ctk.CTkButton(toast, text="✕", width=22, height=22,
-            font=ctk.CTkFont(family=FONT, size=10),
+        # Stack toasts — each one placed above the previous ones
+        offset_y = -20 - (len(self._toasts) * 78)
+        toast.place(relx=1.0, rely=1.0, anchor="se", x=-20, y=offset_y)
+        toast.lift()
+
+        # Accent bar
+        ctk.CTkFrame(toast, fg_color=color, width=5, corner_radius=0
+            ).pack(side="left", fill="y")
+
+        # Content
+        body = ctk.CTkFrame(toast, fg_color="transparent")
+        body.pack(side="left", fill="both", expand=True, padx=(10, 8), pady=8)
+
+        # Top row: icon + title + close
+        top = ctk.CTkFrame(body, fg_color="transparent")
+        top.pack(fill="x")
+        ctk.CTkLabel(top, text=icon, font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
+                     text_color=color, width=20).pack(side="left")
+        ctk.CTkLabel(top, text=title, font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
+                     text_color=TEXT).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(top, text="✕", width=20, height=20,
+            font=ctk.CTkFont(family=FONT, size=9),
             fg_color="transparent", hover_color=HOVER, text_color=TEXT3,
             corner_radius=4, command=lambda t=toast: self._dismiss_toast(t)
-            ).grid(row=0, column=3, padx=(0, 6), pady=(6, 0), sticky="ne")
+            ).pack(side="right")
+
+        # Message
+        ctk.CTkLabel(body, text=clean, font=ctk.CTkFont(family=FONT, size=10),
+                     text_color=TEXT2, wraplength=280, justify="left", anchor="w"
+                     ).pack(fill="x", pady=(2, 0))
 
         self._toasts.append(toast)
         self.after(5000, lambda t=toast: self._dismiss_toast(t))
+
+    def _restack_toasts(self):
+        """Re-place remaining toasts so there are no gaps after one is dismissed."""
+        for i, t in enumerate(self._toasts):
+            offset_y = -20 - (i * 78)
+            try:
+                t.place(relx=1.0, rely=1.0, anchor="se", x=-20, y=offset_y)
+            except Exception:
+                pass
 
     def _dismiss_toast(self, toast):
         try:
             toast.destroy()
             if toast in self._toasts:
                 self._toasts.remove(toast)
-        except:
+            self._restack_toasts()
+        except Exception:
             pass
 
     # ─── Tab routing ─────────────────────────────────────────────
