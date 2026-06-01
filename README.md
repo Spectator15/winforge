@@ -1,8 +1,4 @@
 # WinForge v5 — Windows Toolkit
-**Made by Danish**
-
-A polished Windows optimization and repair toolkit built on Python + CustomTkinter.
-All tweaks use the same backend as [Chris Titus Tech's WinUtil](https://winutil.christitus.com).
 
 ---
 
