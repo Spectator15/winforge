@@ -1,10 +1,16 @@
 """
-WinForge — Windows Toolkit by Danish
-v5: Fixed toast notifications, GPU VRAM (correct GUID), WinUtil-verified telemetry (12 keys)
+WinForge — Windows Toolkit
+v5: Fixed toast notifications, GPU VRAM, verified tweaks
 """
 import customtkinter as ctk
 import threading, sys, os
 from datetime import datetime
+
+# Ensure project root is on sys.path — fixes PyInstaller bundled EXE imports
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
 from core.operations import *
 
 # ─── Theme ────────────────────────────────────────────────────────
