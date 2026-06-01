@@ -269,7 +269,9 @@ def tweak_telemetry(enable=False, cb=None):
     v_inv = "0" if enable else "1"  # for keys that are inverted (restrict = 1 to disable)
     startup = "Automatic" if enable else "Disabled"
     consent = "1" if enable else "2"
-    script = f'''
+    siuf_line = "Remove-ItemProperty -Path \'HKCU:\\Software\\Microsoft\\Siuf\\Rules\' -Name PeriodInNanoSeconds -EA SilentlyContinue" if not enable else ""
+    tele_status = "enabled" if enable else "disabled"
+    script = rf'''
 # 12 registry keys from WinUtil WPFTweaksTelemetry
 $reg = @(
     @{{P="HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo";N="Enabled";V={v}}},
@@ -295,8 +297,8 @@ Set-Service -Name wermgr    -StartupType {startup} -EA SilentlyContinue
 # Defender sample submission
 Set-MpPreference -SubmitSamplesConsent {consent} -EA SilentlyContinue
 # Remove SIUF PeriodInNanoSeconds if disabling
-{"Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Siuf\\Rules' -Name PeriodInNanoSeconds -EA SilentlyContinue" if not enable else ""}
-Write-Host "[OK] Telemetry {'enabled' if enable else 'disabled'} (12 registry keys + services)"
+{siuf_line}
+Write-Host "[OK] Telemetry {tele_status} (12 registry keys + services)"
 '''
     return run_ps(script, cb)
 
@@ -304,7 +306,7 @@ def tweak_activity_history(enable=False, cb=None):
     """WinUtil: WPFTweaksActivity — 3 registry keys"""
     if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} Activity History...")
     v = "1" if enable else "0"
-    script = f'''
+    script = rf'''
 $p = "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\System"
 If(!(Test-Path $p)){{New-Item -Path $p -Force|Out-Null}}
 Set-ItemProperty $p -Name EnableActivityFeed     -Value {v} -Type DWord -Force -EA SilentlyContinue
@@ -321,7 +323,7 @@ def tweak_location(enable=False, cb=None):
     sensor_val   = "1" if enable else "0"
     maps_val     = "1" if enable else "0"
     svc_start    = "Manual" if enable else "Disabled"   # OriginalType is Manual per WinUtil
-    script = f'''
+    script = rf'''
 # Key 1: ConsentStore — Type is String, not DWord
 $p1 = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\location"
 If(!(Test-Path $p1)){{New-Item -Path $p1 -Force|Out-Null}}
@@ -343,7 +345,7 @@ Write-Host "[OK] Location Tracking {'enabled' if enable else 'disabled'} (3 keys
 def tweak_consumer_features(enable=False, cb=None):
     """WinUtil: WPFTweaksConsumerFeatures — 1 registry key (exact match)"""
     if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} Consumer Features...")
-    script = f'''
+    script = rf'''
 $p = "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent"
 If(!(Test-Path $p)){{New-Item -Path $p -Force|Out-Null}}
 {"Remove-ItemProperty $p -Name DisableWindowsConsumerFeatures -EA SilentlyContinue" if enable else 'Set-ItemProperty $p -Name DisableWindowsConsumerFeatures -Value 1 -Type DWord -Force -EA SilentlyContinue'}
@@ -357,7 +359,7 @@ def tweak_hibernation(enable=False, cb=None):
     hiber_val  = "1" if enable else "0"
     flyout_val = "1" if enable else "0"
     cmd        = "powercfg.exe /hibernate on" if enable else "powercfg.exe /hibernate off"
-    script = f'''
+    script = rf'''
 # Key 1: HibernateEnabled
 $p1 = "HKLM:\\System\\CurrentControlSet\\Control\\Session Manager\\Power"
 Set-ItemProperty $p1 -Name HibernateEnabled -Value {hiber_val} -Type DWord -Force -EA SilentlyContinue
@@ -374,7 +376,7 @@ Write-Host "[OK] Hibernation {'enabled' if enable else 'disabled'} (2 registry k
 def tweak_fast_startup(enable=True, cb=None):
     if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} Fast Startup...")
     v = "1" if enable else "0"
-    script = f'''
+    script = rf'''
 $p = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power"
 Set-ItemProperty $p -Name HiberbootEnabled -Value {v} -Type DWord -Force -EA SilentlyContinue
 Write-Host "[OK] Fast Startup {'enabled' if enable else 'disabled'}"
@@ -385,7 +387,7 @@ def tweak_show_extensions(enable=True, cb=None):
     """WinUtil: WPFToggleShowExt — HideFileExt DWord + Explorer restart (exact match)"""
     if cb: cb(f"[INFO] {'Showing' if enable else 'Hiding'} file extensions...")
     v = "0" if enable else "1"
-    script = f'''
+    script = rf'''
 Set-ItemProperty "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced" -Name HideFileExt -Value {v} -Type DWord -Force -EA SilentlyContinue
 # WinUtil InvokeScript: restart Explorer
 Stop-Process -Name explorer -Force -EA SilentlyContinue
@@ -397,7 +399,7 @@ def tweak_show_hidden(enable=True, cb=None):
     """WinUtil: WPFToggleHiddenFiles — Hidden DWord + Explorer restart (exact match)"""
     if cb: cb(f"[INFO] {'Showing' if enable else 'Hiding'} hidden files...")
     v = "1" if enable else "0"
-    script = f'''
+    script = rf'''
 Set-ItemProperty "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced" -Name Hidden -Value {v} -Type DWord -Force -EA SilentlyContinue
 # WinUtil InvokeScript: restart Explorer
 Stop-Process -Name explorer -Force -EA SilentlyContinue
@@ -482,11 +484,11 @@ Write-Host "[OK] Services restored to original startup types"
     return run_ps(script, cb)
 
 def tweak_num_lock(enable=True, cb=None):
-    """WinUtil: WPFToggleNumLock — 2 keys (HKU\.Default + HKCU), Type=String (exact match)"""
+    """WinUtil: WPFToggleNumLock - 2 keys (HKU Default + HKCU), Type=String (exact match)"""
     if cb: cb(f"[INFO] Setting NumLock on startup: {enable}...")
     v = "2" if enable else "0"
-    script = f'''
-# WinUtil sets both HKU\.Default (system default for new logins) and HKCU (current user)
+    script = rf'''
+# WinUtil sets both HKU\\.Default (system default for new logins) and HKCU (current user)
 # Type is String per WinUtil, not DWord
 Set-ItemProperty "HKU:\\.Default\\Control Panel\\Keyboard" -Name InitialKeyboardIndicators -Value "{v}" -Type String -Force -EA SilentlyContinue
 Set-ItemProperty "HKCU:\\Control Panel\\Keyboard" -Name InitialKeyboardIndicators -Value "{v}" -Type String -Force -EA SilentlyContinue
@@ -497,7 +499,7 @@ Write-Host "[OK] NumLock on startup {'enabled' if enable else 'disabled'} (2 key
 def tweak_verbose_logon(enable=True, cb=None):
     if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} verbose logon messages...")
     v = "1" if enable else "0"
-    script = f'''
+    script = rf'''
 $p = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System"
 Set-ItemProperty $p -Name VerboseStatus -Value {v} -Type DWord -Force -EA SilentlyContinue
 Write-Host "[OK] Verbose logon {'enabled' if enable else 'disabled'}"
@@ -508,7 +510,7 @@ def tweak_dark_mode(enable=True, cb=None):
     """WinUtil: WPFToggleDarkMode — AppsUseLightTheme + SystemUsesLightTheme + Explorer restart (exact match)"""
     if cb: cb(f"[INFO] Switching to {'Dark' if enable else 'Light'} mode...")
     v = "0" if enable else "1"
-    script = f'''
+    script = rf'''
 # WinUtil uses HKCU:\SOFTWARE (uppercase) and restarts Explorer
 $p = "HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
 If(!(Test-Path $p)){{New-Item -Path $p -Force|Out-Null}}
@@ -604,7 +606,7 @@ def remove_app(package_name: str, display_name: str, cb=None):
         if cb: cb(f"[INFO] {display_name} is not installed — skipping")
         return
     if cb: cb(f"[INFO] Removing {display_name}...")
-    script = f'''
+    script = rf'''
 Get-AppxPackage -Name "*{package_name}*" | Remove-AppxPackage -EA SilentlyContinue
 Get-AppxProvisionedPackage -Online | Where-Object DisplayName -like "*{package_name}*" | Remove-AppxProvisionedPackage -Online -EA SilentlyContinue
 $verify = Get-AppxPackage -Name "*{package_name}*" -EA SilentlyContinue
@@ -641,7 +643,7 @@ Write-Host "[OK] DNS reset to automatic (DHCP)"
         pv6_block = ""
         if ipv6:
             pv6_block = f'Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses ("{ipv6[0]}","{ipv6[1] if len(ipv6)>1 else ipv6[0]}")'
-        script = f'''
+        script = rf'''
 $adapters = Get-NetAdapter | Where-Object {{$_.Status -eq "Up"}}
 foreach ($a in $adapters) {{
     Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses ("{primary}","{secondary}")
@@ -809,7 +811,7 @@ Write-Host "[OK] Cleaned $removed broken uninstall entries"
 # ─────────────────────────── RESTORE POINTS ─────────────────────────
 def create_restore_point(description: str = "WinForge Manual Restore Point", cb=None):
     if cb: cb(f"[INFO] Creating restore point: {description}...")
-    script = f'''
+    script = rf'''
 Enable-ComputerRestore -Drive "C:\\" -EA SilentlyContinue
 # Bypass 24h limit
 $key = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore"
