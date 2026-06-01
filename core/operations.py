@@ -535,3 +535,124 @@ PRESETS = {
     "Fresh Install": {"tweaks":["pref_file_ext","pref_hidden_files","pref_dark_mode","pref_no_sticky_keys","disable_telemetry","consumer_features","pref_classic_menu","pref_no_startup_delay","end_task_rightclick","remove_widgets","start_menu_layout","pref_no_bing_search","pref_no_recommendations","pref_bsod_verbose"]},
     "Performance": {"tweaks":["pref_high_perf","disable_bg_apps","visual_performance","pref_no_startup_delay","disable_telemetry","services_manual","disable_storage_sense","disable_fullscreen_opt","pref_multiplane_overlay"]},
 }
+
+# ═══ SYSTEM INFO ══════════════════════════════════════════════════════════════
+
+def get_system_info(cb=None):
+    if cb: cb("[INFO] Gathering system information...")
+    cmd = r'''
+    $info = @{}
+
+    # OS
+    $os = Get-CimInstance Win32_OperatingSystem
+    $info["os_name"] = $os.Caption
+    $info["os_version"] = $os.Version
+    $info["os_build"] = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion").DisplayVersion
+    $info["os_arch"] = $os.OSArchitecture
+    $info["install_date"] = $os.InstallDate.ToString("yyyy-MM-dd")
+
+    # CPU
+    $cpu = Get-CimInstance Win32_Processor
+    $info["cpu_name"] = $cpu.Name.Trim()
+    $info["cpu_cores"] = $cpu.NumberOfCores
+    $info["cpu_threads"] = $cpu.NumberOfLogicalProcessors
+    $info["cpu_clock"] = [math]::Round($cpu.MaxClockSpeed / 1000, 2)
+
+    # RAM
+    $ram = Get-CimInstance Win32_PhysicalMemory
+    $totalGB = [math]::Round(($ram | Measure-Object Capacity -Sum).Sum / 1GB, 1)
+    $speed = ($ram | Select-Object -First 1).Speed
+    $type = ($ram | Select-Object -First 1).SMBIOSMemoryType
+    $typeStr = switch($type) { 26 {"DDR4"} 34 {"DDR5"} 24 {"DDR3"} default {"DDR"} }
+    $sticks = $ram.Count
+    $info["ram_total"] = "$totalGB GB"
+    $info["ram_speed"] = "$speed MHz"
+    $info["ram_type"] = $typeStr
+    $info["ram_sticks"] = "$sticks stick(s)"
+
+    # GPU
+    $gpus = Get-CimInstance Win32_VideoController
+    $gpuList = @()
+    foreach ($g in $gpus) {
+        $vram = [math]::Round($g.AdapterRAM / 1GB, 1)
+        if ($vram -le 0) { $vram = "Shared" } else { $vram = "$vram GB" }
+        $gpuList += "$($g.Name) ($vram)"
+    }
+    $info["gpu"] = $gpuList -join " | "
+    $info["gpu_driver"] = ($gpus | Select-Object -First 1).DriverVersion
+
+    # Storage
+    $disks = Get-CimInstance Win32_DiskDrive
+    $diskList = @()
+    foreach ($d in $disks) {
+        $sizeGB = [math]::Round($d.Size / 1GB, 0)
+        $diskList += "$($d.Model) (${sizeGB} GB, $($d.MediaType))"
+    }
+    $info["storage_drives"] = $diskList -join " | "
+
+    # Partitions with free space
+    $vols = Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -eq 3 }
+    $volList = @()
+    foreach ($v in $vols) {
+        $totalG = [math]::Round($v.Size / 1GB, 1)
+        $freeG = [math]::Round($v.FreeSpace / 1GB, 1)
+        $volList += "$($v.DeviceID) $freeG GB free / $totalG GB"
+    }
+    $info["partitions"] = $volList -join " | "
+
+    # Motherboard
+    $mb = Get-CimInstance Win32_BaseBoard
+    $info["motherboard"] = "$($mb.Manufacturer) $($mb.Product)"
+
+    # BIOS
+    $bios = Get-CimInstance Win32_BIOS
+    $info["bios"] = "$($bios.Manufacturer) $($bios.SMBIOSBIOSVersion)"
+
+    # Secure Boot
+    try {
+        $sb = Confirm-SecureBootUEFI
+        $info["secure_boot"] = if ($sb) { "Enabled" } else { "Disabled" }
+    } catch { $info["secure_boot"] = "Not supported / Legacy BIOS" }
+
+    # TPM
+    try {
+        $tpm = Get-CimInstance -Namespace "root\cimv2\Security\MicrosoftTpm" -ClassName Win32_Tpm -EA Stop
+        $info["tpm"] = "v$($tpm.SpecVersion.Split(',')[0]) - Present"
+    } catch { $info["tpm"] = "Not detected" }
+
+    # Network
+    $net = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
+    if ($net) {
+        $info["network_adapter"] = $net.Name
+        $info["network_speed"] = "$([math]::Round($net.LinkSpeed.Replace(' Gbps','').Replace(' Mbps',''),0)) $($net.LinkSpeed -replace '[0-9. ]','')"
+        $info["mac"] = $net.MacAddress
+    }
+
+    # Uptime
+    $uptime = (Get-Date) - $os.LastBootUpTime
+    $info["uptime"] = "$($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m"
+
+    # Windows Defender
+    try {
+        $def = Get-MpComputerStatus -EA Stop
+        $info["defender"] = if ($def.AntivirusEnabled) { "Enabled" } else { "Disabled" }
+        $info["defender_updated"] = $def.AntivirusSignatureLastUpdated.ToString("yyyy-MM-dd HH:mm")
+    } catch { $info["defender"] = "Unknown" }
+
+    # Power Plan
+    $plan = powercfg /getactivescheme
+    $info["power_plan"] = ($plan -replace "Power Scheme GUID: [a-f0-9-]+ +\(","" -replace "\)","").Trim()
+
+    # Output as KEY=VALUE
+    foreach ($k in $info.Keys | Sort-Object) {
+        Write-Host "SYSINFO:$k=$($info[$k])"
+    }
+    '''
+    s, o = run_ps(cmd, cb)
+    result = {}
+    for line in o.split("\n"):
+        if line.startswith("SYSINFO:"):
+            parts = line[8:].split("=", 1)
+            if len(parts) == 2:
+                result[parts[0]] = parts[1]
+    return result

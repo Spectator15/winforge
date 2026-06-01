@@ -50,17 +50,17 @@ class WinForgeApp(ctk.CTk):
         self._main.grid(row=0,column=1,sticky="nsew")
         self._main.grid_columnconfigure(0,weight=1); self._main.grid_rowconfigure(1,weight=1)
         self._build_log()
-        self._go("repair")
+        self._go("sysinfo")
 
     def _sidebar(self):
         s=ctk.CTkFrame(self,fg_color=PANEL,width=215,corner_radius=0)
-        s.grid(row=0,column=0,sticky="nsew"); s.grid_propagate(False); s.grid_rowconfigure(13,weight=1)
+        s.grid(row=0,column=0,sticky="nsew"); s.grid_propagate(False); s.grid_rowconfigure(14,weight=1)
         lf=ctk.CTkFrame(s,fg_color="transparent")
         lf.grid(row=0,column=0,padx=16,pady=(20,4),sticky="ew")
         ctk.CTkLabel(lf,text="WinForge",font=ctk.CTkFont(family=FONT,size=22,weight="bold"),text_color=ACCENT).pack(anchor="w")
         ctk.CTkLabel(lf,text="Made by Danish",font=ctk.CTkFont(family=FONT,size=10),text_color=TXT3).pack(anchor="w")
         ctk.CTkFrame(s,fg_color=BORD,height=1).grid(row=1,column=0,sticky="ew",padx=12,pady=(6,12))
-        tabs=[("repair","System Repair"),("cleanup","Cleanup"),("deps","Dependencies"),
+        tabs=[("sysinfo","System Info"),("repair","System Repair"),("cleanup","Cleanup"),("deps","Dependencies"),
               ("apps","Install Apps"),("tweaks","Tweaks & Debloat"),
               ("dns","DNS Settings"),("updates","Updates"),("registry","Registry Health"),
               ("tools","System Tools"),("restore","Restore Point")]
@@ -71,7 +71,7 @@ class WinForgeApp(ctk.CTk):
                 command=lambda t=tid: self._go(t))
             b.grid(row=i,column=0,padx=8,pady=1,sticky="ew"); self._btns[tid]=b
         ctk.CTkLabel(s,text="v4.0  ·  admin",font=ctk.CTkFont(family=FONT,size=10),
-            text_color=TXT3).grid(row=14,column=0,padx=16,pady=12,sticky="sw")
+            text_color=TXT3).grid(row=15,column=0,padx=16,pady=12,sticky="sw")
 
     def _build_log(self):
         lf=ctk.CTkFrame(self._main,fg_color=PANEL,corner_radius=8)
@@ -110,7 +110,7 @@ class WinForgeApp(ctk.CTk):
         f=ctk.CTkScrollableFrame(self._main,fg_color="transparent",corner_radius=0)
         f.grid(row=1,column=0,sticky="nsew",padx=12,pady=(6,4)); f.grid_columnconfigure(0,weight=1)
         self._tab=f
-        {"repair":self._t_repair,"cleanup":self._t_cleanup,"deps":self._t_deps,
+        {"sysinfo":self._t_sysinfo,"repair":self._t_repair,"cleanup":self._t_cleanup,"deps":self._t_deps,
          "apps":self._t_apps,"tweaks":self._t_tweaks,"dns":self._t_dns,
          "updates":self._t_updates,"registry":self._t_registry,
          "tools":self._t_tools,"restore":self._t_restore}[tid](f)
@@ -146,6 +146,87 @@ class WinForgeApp(ctk.CTk):
             return s._confirm("Restore Point", "A restore point was already created this session.\nCreate another one before proceeding?", False)
         create_restore_point(label, s._log)
         return True
+
+    # ─── SYSTEM INFO ────────────────────────────────────────────────────────
+    def _t_sysinfo(s,p):
+        s._hdr(p,"System Info","Your hardware and system details.")
+        loading=s._crd(p,1)
+        ctk.CTkLabel(loading,text="Loading system information...",font=ctk.CTkFont(family=FONT,size=13),text_color=TXT2).grid(row=0,column=0,padx=12,pady=12,sticky="w")
+        def fetch():
+            info=get_system_info(s._log)
+            s.after(0,lambda: s._render_sysinfo(p,info))
+        threading.Thread(target=fetch,daemon=True).start()
+
+    def _render_sysinfo(s,p,info):
+        # Remove loading card
+        for w in p.winfo_children():
+            if w != p.winfo_children()[0]: w.destroy()  # keep header
+        sections=[
+            ("Operating System",[
+                ("OS",info.get("os_name","Unknown")),
+                ("Version",f"{info.get('os_build','?')} (Build {info.get('os_version','?')})"),
+                ("Architecture",info.get("os_arch","?")),
+                ("Installed",info.get("install_date","?")),
+                ("Uptime",info.get("uptime","?")),
+            ]),
+            ("Processor",[
+                ("CPU",info.get("cpu_name","Unknown")),
+                ("Cores / Threads",f"{info.get('cpu_cores','?')} cores / {info.get('cpu_threads','?')} threads"),
+                ("Max Clock",f"{info.get('cpu_clock','?')} GHz"),
+            ]),
+            ("Memory",[
+                ("Total RAM",info.get("ram_total","?")),
+                ("Speed",info.get("ram_speed","?")),
+                ("Type",info.get("ram_type","?")),
+                ("Configuration",info.get("ram_sticks","?")),
+            ]),
+            ("Graphics",[
+                ("GPU",info.get("gpu","Unknown")),
+                ("Driver Version",info.get("gpu_driver","?")),
+            ]),
+            ("Storage",[
+                ("Drives",info.get("storage_drives","?")),
+                ("Partitions",info.get("partitions","?")),
+            ]),
+            ("Motherboard & BIOS",[
+                ("Motherboard",info.get("motherboard","?")),
+                ("BIOS",info.get("bios","?")),
+            ]),
+            ("Security",[
+                ("Secure Boot",info.get("secure_boot","?")),
+                ("TPM",info.get("tpm","?")),
+                ("Windows Defender",info.get("defender","?")),
+                ("Definitions Updated",info.get("defender_updated","?")),
+            ]),
+            ("Network",[
+                ("Active Adapter",info.get("network_adapter","?")),
+                ("Link Speed",info.get("network_speed","?")),
+                ("MAC Address",info.get("mac","?")),
+            ]),
+            ("Power",[
+                ("Active Plan",info.get("power_plan","?")),
+            ]),
+        ]
+        row=1
+        for sect_name,fields in sections:
+            cd=s._crd(p,row,py=(0,4)); row+=1
+            ctk.CTkLabel(cd,text=sect_name,font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=ACCENT).grid(row=0,column=0,columnspan=2,padx=12,pady=(8,4),sticky="w")
+            cd.grid_columnconfigure(1,weight=1)
+            for fi,(label,value) in enumerate(fields,1):
+                ctk.CTkLabel(cd,text=label,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT3).grid(row=fi,column=0,padx=(12,8),pady=1,sticky="w")
+                ctk.CTkLabel(cd,text=value,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT,wraplength=600,justify="left").grid(row=fi,column=1,padx=(0,12),pady=1,sticky="w")
+            ctk.CTkFrame(cd,fg_color=CARD,height=4).grid(row=99,column=0,columnspan=2,sticky="ew")
+
+        # Copy to clipboard button
+        def copy_all():
+            text=[]
+            for sect_name,fields in sections:
+                text.append(f"── {sect_name} ──")
+                for label,value in fields: text.append(f"  {label}: {value}")
+                text.append("")
+            s.clipboard_clear(); s.clipboard_append("\n".join(text))
+            s._log("[OK] System info copied to clipboard.")
+        ctk.CTkButton(p,text="Copy to Clipboard",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=34,width=160,command=copy_all).grid(row=row,column=0,pady=(6,4),sticky="w")
 
     # ─── REPAIR ───────────────────────────────────────────────────────────────
     def _t_repair(s,p):
