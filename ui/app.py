@@ -1,152 +1,238 @@
+"""
+WinForge — Windows Toolkit by Danish
+v5: Fixed toast notifications, GPU VRAM (correct GUID), WinUtil-verified telemetry (12 keys)
+"""
 import customtkinter as ctk
 import threading, sys, os
 from datetime import datetime
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.operations import *
 
-# ─── THEME (artifact-free, solid fills, no gradients) ─────────────────────────
-BG="#0b0b0e"; PANEL="#0f0f14"; CARD="#151519"; CARD2="#1a1a20"; HOVER="#222230"
-ACCENT="#5b8dee"; ACCENT2="#3a5fb0"; OK="#3dcf6e"; WARN="#f0a020"
-DANGER="#e04040"; DANGER2="#a02020"; TXT="#ededf5"; TXT2="#8888a0"; TXT3="#50506a"
-BORD="#1e1e30"; PURPLE="#9b5de5"; FONT="Segoe UI"; MONO="Consolas"
+# ─── Theme ────────────────────────────────────────────────────────
+BG     = "#0f1117"
+PANEL  = "#161b22"
+CARD   = "#1c2330"
+CARD2  = "#21293a"
+BORDER = "#30363d"
+HOVER  = "#2d3748"
 
-class ToolTip:
-    def __init__(s,w,t):
-        s.w,s.t,s.tip,s._id=w,t,None,None; s._ba(w)
-    def _ba(s,w):
-        w.bind("<Enter>",s._ss,add="+"); w.bind("<Leave>",s._dh,add="+")
-        try:
-            for c in w.winfo_children(): s._ba(c)
-        except: pass
-    def _ss(s,e=None): s._c(); s._id=s.w.after(350,s._sh)
-    def _dh(s,e=None): s._c(); s._h()
-    def _c(s):
-        if s._id: s.w.after_cancel(s._id); s._id=None
-    def _sh(s):
-        s._h()
-        try:
-            x,y=s.w.winfo_rootx()+20,s.w.winfo_rooty()+s.w.winfo_height()+4
-            s.tip=tw=ctk.CTkToplevel(); tw.wm_overrideredirect(True); tw.wm_geometry(f"+{x}+{y}")
-            tw.configure(fg_color=CARD2); tw.attributes("-topmost",True)
-            f=ctk.CTkFrame(tw,fg_color=CARD2,border_width=1,border_color=BORD,corner_radius=6); f.pack(padx=1,pady=1)
-            ctk.CTkLabel(f,text=s.t,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT2,wraplength=340,justify="left").pack(padx=10,pady=6)
-        except: pass
-    def _h(s):
-        if s.tip:
-            try: s.tip.destroy()
-            except: pass
-            s.tip=None
+TEXT   = "#e6edf3"
+TEXT2  = "#8b949e"
+TEXT3  = "#6e7681"
 
-class WinForgeApp(ctk.CTk):
+ACCENT  = "#58a6ff"
+SUCCESS = "#3fb950"
+WARN    = "#d29922"
+DANGER  = "#f85149"
+PURPLE  = "#bc8cff"
+
+FONT = "Segoe UI"
+MONO = "Consolas"
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+# ─── Re-launch as admin if needed ────────────────────────────────
+def relaunch_as_admin():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            ctypes.windll.shell32.ShellExecuteW(None,"runas",sys.executable," ".join(sys.argv),None,1)
+            sys.exit()
+    except:
+        pass
+
+relaunch_as_admin()
+
+
+class WinForge(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("WinForge"); self.geometry("1160x760"); self.minsize(1000,660)
+        self.title("WinForge — Windows Toolkit by Danish")
+        self.geometry("1100x750")
+        self.minsize(900, 600)
         self.configure(fg_color=BG)
-        self._tab=None; self._tvars={}; self._bvars={}; self._avars={}; self._tips=[]
-        self.grid_columnconfigure(1,weight=1); self.grid_rowconfigure(0,weight=1)
-        self._sidebar()
-        self._main=ctk.CTkFrame(self,fg_color=BG,corner_radius=0)
-        self._main.grid(row=0,column=1,sticky="nsew")
-        self._main.grid_columnconfigure(0,weight=1); self._main.grid_rowconfigure(1,weight=1)
-        self._build_log()
-        self._go("sysinfo")
 
-    def _sidebar(self):
-        s=ctk.CTkFrame(self,fg_color=PANEL,width=215,corner_radius=0)
-        s.grid(row=0,column=0,sticky="nsew"); s.grid_propagate(False); s.grid_rowconfigure(14,weight=1)
-        lf=ctk.CTkFrame(s,fg_color="transparent")
-        lf.grid(row=0,column=0,padx=16,pady=(20,4),sticky="ew")
-        ctk.CTkLabel(lf,text="WinForge",font=ctk.CTkFont(family=FONT,size=22,weight="bold"),text_color=ACCENT).pack(anchor="w")
-        ctk.CTkLabel(lf,text="Made by Danish",font=ctk.CTkFont(family=FONT,size=10),text_color=TXT3).pack(anchor="w")
-        ctk.CTkFrame(s,fg_color=BORD,height=1).grid(row=1,column=0,sticky="ew",padx=12,pady=(6,12))
-        tabs=[("sysinfo","System Info"),("repair","System Repair"),("cleanup","Cleanup"),("deps","Dependencies"),
-              ("apps","Install Apps"),("tweaks","Tweaks & Debloat"),
-              ("dns","DNS Settings"),("updates","Updates"),("registry","Registry Health"),
-              ("tools","System Tools"),("restore","Restore Point")]
-        self._btns={}
-        for i,(tid,lbl) in enumerate(tabs,2):
-            b=ctk.CTkButton(s,text=lbl,anchor="w",font=ctk.CTkFont(family=FONT,size=13),
-                fg_color="transparent",hover_color=HOVER,text_color=TXT2,corner_radius=8,height=36,
-                command=lambda t=tid: self._go(t))
-            b.grid(row=i,column=0,padx=8,pady=1,sticky="ew"); self._btns[tid]=b
-        ctk.CTkLabel(s,text="v4.0  ·  admin",font=ctk.CTkFont(family=FONT,size=10),
-            text_color=TXT3).grid(row=15,column=0,padx=16,pady=12,sticky="sw")
+        self._restore_point_this_session = False
+        self._toasts: list = []
+        self._log_visible = True
+
+        self._build_layout()
+        self._build_nav()
+        self._build_log()
+        self._build_toast_area()
+        self._show_tab("System Info")
+
+    # ─── Layout skeleton ─────────────────────────────────────────
+    def _build_layout(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # Sidebar
+        self._sidebar = ctk.CTkFrame(self, width=190, fg_color=PANEL, corner_radius=0)
+        self._sidebar.grid(row=0, column=0, rowspan=2, sticky="nsw")
+        self._sidebar.grid_propagate(False)
+        self._sidebar.grid_rowconfigure(20, weight=1)
+
+        # Main area
+        self._main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        self._main.grid(row=0, column=1, sticky="nsew")
+        self._main.grid_columnconfigure(0, weight=1)
+        self._main.grid_rowconfigure(1, weight=1)
+
+    def _build_nav(self):
+        ctk.CTkLabel(self._sidebar, text="WinForge",
+            font=ctk.CTkFont(family=FONT, size=20, weight="bold"),
+            text_color=ACCENT).grid(row=0, column=0, padx=16, pady=(18,2), sticky="w")
+        ctk.CTkLabel(self._sidebar, text="by Danish",
+            font=ctk.CTkFont(family=FONT, size=11), text_color=TEXT3
+            ).grid(row=1, column=0, padx=16, pady=(0,14), sticky="w")
+
+        self._nav_btns = {}
+        tabs = [
+            ("System Info",   "💻"),
+            ("Repair",        "🔧"),
+            ("Cleanup",       "🧹"),
+            ("Dependencies",  "📦"),
+            ("Install Apps",  "⬇️"),
+            ("Tweaks & Debloat","⚙️"),
+            ("DNS Settings",  "🌐"),
+            ("Win Updates",   "🔄"),
+            ("Registry Health","🗂️"),
+            ("System Tools",  "🛠️"),
+            ("Restore Points","💾"),
+        ]
+        for i, (name, icon) in enumerate(tabs):
+            btn = ctk.CTkButton(self._sidebar, text=f"  {icon}  {name}",
+                font=ctk.CTkFont(family=FONT, size=12), anchor="w",
+                fg_color="transparent", hover_color=HOVER, text_color=TEXT2,
+                corner_radius=6, height=36,
+                command=lambda n=name: self._show_tab(n))
+            btn.grid(row=i+2, column=0, padx=8, pady=2, sticky="ew")
+            self._nav_btns[name] = btn
 
     def _build_log(self):
-        self._log_visible = True
         self._log_frame = ctk.CTkFrame(self._main, fg_color=PANEL, corner_radius=8)
-        self._log_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0,10))
+        self._log_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
         self._log_frame.grid_columnconfigure(0, weight=1)
 
-        h = ctk.CTkFrame(self._log_frame, fg_color="transparent")
-        h.grid(row=0, column=0, sticky="ew", padx=10, pady=(6,0))
-        h.grid_columnconfigure(1, weight=1)
+        hdr = ctk.CTkFrame(self._log_frame, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=10, pady=(6, 0))
+        hdr.grid_columnconfigure(1, weight=1)
 
-        self._log_toggle = ctk.CTkButton(h, text="▼ Output Log", width=120, height=22,
-            font=ctk.CTkFont(family=FONT, size=11, weight="bold"), fg_color="transparent",
-            hover_color=HOVER, text_color=TXT2, corner_radius=5, anchor="w",
-            command=self._toggle_log)
-        self._log_toggle.grid(row=0, column=0, sticky="w")
+        self._log_toggle_btn = ctk.CTkButton(hdr, text="▼  Output Log", width=120, height=22,
+            font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
+            fg_color="transparent", hover_color=HOVER, text_color=TEXT2,
+            corner_radius=5, anchor="w", command=self._toggle_log)
+        self._log_toggle_btn.grid(row=0, column=0, sticky="w")
 
-        ctk.CTkButton(h, text="Clear", width=50, height=20,
-            font=ctk.CTkFont(family=FONT, size=10), fg_color=CARD, hover_color=HOVER,
-            text_color=TXT3, corner_radius=5, command=self._clog).grid(row=0, column=2, sticky="e")
+        ctk.CTkButton(hdr, text="Clear", width=50, height=20,
+            font=ctk.CTkFont(family=FONT, size=10),
+            fg_color=CARD, hover_color=HOVER, text_color=TEXT3,
+            corner_radius=5, command=self._clear_log
+            ).grid(row=0, column=2, sticky="e")
 
-        self._logbox = ctk.CTkTextbox(self._log_frame, height=130,
-            font=ctk.CTkFont(family=MONO, size=11), fg_color=BG, text_color=TXT,
+        self._logbox_container = ctk.CTkFrame(self._log_frame, fg_color="transparent")
+        self._logbox_container.grid(row=1, column=0, sticky="ew")
+        self._logbox_container.grid_columnconfigure(0, weight=1)
+
+        self._logbox = ctk.CTkTextbox(self._logbox_container, height=120,
+            font=ctk.CTkFont(family=MONO, size=11), fg_color=BG, text_color=TEXT,
             corner_radius=6, wrap="word", state="disabled")
-        self._logbox.grid(row=1, column=0, sticky="ew", padx=6, pady=6)
-        self._logbox.tag_config("ok", foreground=OK)
+        self._logbox.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+        self._logbox.tag_config("ok",   foreground=SUCCESS)
         self._logbox.tag_config("warn", foreground=WARN)
-        self._logbox.tag_config("err", foreground=DANGER)
+        self._logbox.tag_config("err",  foreground=DANGER)
         self._logbox.tag_config("info", foreground=ACCENT)
 
-        # Toast container (bottom right)
-        self._toast_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self._toast_frame.place(relx=1.0, rely=1.0, anchor="se", x=-20, y=-20)
-        self._toasts = []
-
     def _toggle_log(self):
-        if self._log_visible:
-            self._logbox.grid_remove()
-            self._log_toggle.configure(text="▶ Output Log")
-        else:
-            self._logbox.grid()
-            self._log_toggle.configure(text="▼ Output Log")
         self._log_visible = not self._log_visible
+        if self._log_visible:
+            self._logbox_container.grid()
+            self._log_toggle_btn.configure(text="▼  Output Log")
+        else:
+            self._logbox_container.grid_remove()
+            self._log_toggle_btn.configure(text="▶  Output Log")
 
-    def _log(self,msg):
-        def w():
+    def _build_toast_area(self):
+        # Overlay frame anchored to bottom-right of main area
+        self._toast_overlay = ctk.CTkFrame(self._main, fg_color="transparent", width=340)
+        self._toast_overlay.grid(row=0, column=0, rowspan=3, sticky="se", padx=16, pady=16)
+        self._toast_overlay.grid_propagate(False)
+        self._toast_overlay.lift()
+
+    def _log_line(self, msg: str):
+        def _write():
             self._logbox.configure(state="normal")
-            ts=datetime.now().strftime("%H:%M:%S")
-            tag="ok" if any(x in msg for x in ["[OK]","success","complete","cleaned","created","enabled","disabled","removed","set to"]) else \
-                "warn" if "[WARN]" in msg else "err" if "[ERROR]" in msg or "fail" in msg.lower() else \
-                "info" if "[INFO]" in msg else None
-            self._logbox.insert("end",f"[{ts}] {msg}\n",tag if tag else ())
-            self._logbox.see("end"); self._logbox.configure(state="disabled")
-            # Trigger toast on completion messages
-            if tag == "ok" and any(x in msg for x in ["complete","applied","removed","installed","cleaned","created","copied","reset","configured","debloated"]):
-                clean_msg = msg.replace("[OK] ","").strip()
-                self._show_toast(clean_msg, OK)
-            elif tag == "warn" and "[WARN]" in msg:
-                clean_msg = msg.replace("[WARN] ","").strip()
-                self._show_toast(clean_msg, WARN)
-        self.after(0,w)
-    def _clog(self):
-        self._logbox.configure(state="normal"); self._logbox.delete("1.0","end"); self._logbox.configure(state="disabled")
+            ts = datetime.now().strftime("%H:%M:%S")
+            m = msg.lower()
+            tag = (
+                "ok"   if any(x in m for x in ["[ok]", "success", "complete", "cleaned", "created", "enabled", "disabled", "removed", "set to", "applied", "install"]) else
+                "warn" if "[warn]" in m else
+                "err"  if any(x in m for x in ["[error]", "fail", "cannot", "exception"]) else
+                "info" if "[info]" in m else None
+            )
+            self._logbox.insert("end", f"[{ts}] {msg}\n", tag or ())
+            self._logbox.see("end")
+            self._logbox.configure(state="disabled")
 
-    def _show_toast(self, msg, color=OK):
-        """Show a notification toast at bottom-right that fades after 5 seconds."""
-        toast = ctk.CTkFrame(self._toast_frame, fg_color=CARD2, corner_radius=8,
+            # Toast on completion
+            if any(x in m for x in ["[ok]", "complete", "success"]):
+                self._show_toast(msg, "ok")
+            elif "[warn]" in m:
+                self._show_toast(msg, "warn")
+            elif any(x in m for x in ["[error]", "fail"]):
+                self._show_toast(msg, "err")
+
+        self.after(0, _write)
+
+    def _clear_log(self):
+        self._logbox.configure(state="normal")
+        self._logbox.delete("1.0", "end")
+        self._logbox.configure(state="disabled")
+
+    # ─── Toast notifications ─────────────────────────────────────
+    def _show_toast(self, message: str, kind: str = "ok"):
+        # Strip log prefix for display
+        clean = message
+        for prefix in ["[OK] ", "[WARN] ", "[ERROR] ", "[INFO] "]:
+            clean = clean.replace(prefix, "")
+        clean = clean[:80] + ("..." if len(clean) > 80 else "")
+
+        color = SUCCESS if kind == "ok" else WARN if kind == "warn" else DANGER
+
+        # Toast container
+        toast = ctk.CTkFrame(self._toast_overlay, fg_color=CARD2, corner_radius=8,
                              border_width=1, border_color=color)
-        toast.pack(side="bottom", anchor="e", pady=3, padx=0)
+        toast.pack(side="bottom", anchor="e", pady=3, fill="x")
+        toast.grid_columnconfigure(1, weight=1)
 
+        # Colored accent bar
         bar = ctk.CTkFrame(toast, fg_color=color, width=4, corner_radius=2)
-        bar.pack(side="left", fill="y", padx=(0,0))
+        bar.grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 0), pady=0)
 
-        ctk.CTkLabel(toast, text=msg, font=ctk.CTkFont(family=FONT, size=11),
-                     text_color=TXT, wraplength=300, justify="left").pack(side="left", padx=(8,12), pady=8)
+        # Icon
+        icon = "✓" if kind == "ok" else "⚠" if kind == "warn" else "✗"
+        ctk.CTkLabel(toast, text=icon, font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
+                     text_color=color, width=22).grid(row=0, column=1, padx=(8, 0), pady=(8, 0), sticky="nw")
+
+        # Title
+        title = "Done" if kind == "ok" else "Warning" if kind == "warn" else "Error"
+        ctk.CTkLabel(toast, text=title, font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
+                     text_color=TEXT).grid(row=0, column=2, padx=(4, 40), pady=(8, 0), sticky="w")
+
+        # Message
+        ctk.CTkLabel(toast, text=clean, font=ctk.CTkFont(family=FONT, size=10),
+                     text_color=TEXT2, wraplength=260, justify="left"
+                     ).grid(row=1, column=1, columnspan=2, padx=(8, 40), pady=(0, 8), sticky="w")
+
+        # Close button
+        ctk.CTkButton(toast, text="✕", width=22, height=22,
+            font=ctk.CTkFont(family=FONT, size=10),
+            fg_color="transparent", hover_color=HOVER, text_color=TEXT3,
+            corner_radius=4, command=lambda t=toast: self._dismiss_toast(t)
+            ).grid(row=0, column=3, padx=(0, 6), pady=(6, 0), sticky="ne")
 
         self._toasts.append(toast)
         self.after(5000, lambda t=toast: self._dismiss_toast(t))
@@ -156,432 +242,602 @@ class WinForgeApp(ctk.CTk):
             toast.destroy()
             if toast in self._toasts:
                 self._toasts.remove(toast)
-        except: pass
+        except:
+            pass
 
-    def _go(self,tid):
-        for t in self._tips: t._c(); t._h()
-        self._tips=[]
-        if self._tab: self._tab.destroy()
-        for k,b in self._btns.items():
-            b.configure(fg_color=ACCENT2 if k==tid else "transparent",text_color=TXT if k==tid else TXT2)
-        self.update_idletasks()
-        f=ctk.CTkScrollableFrame(self._main,fg_color="transparent",corner_radius=0)
-        f.grid(row=1,column=0,sticky="nsew",padx=12,pady=(6,4)); f.grid_columnconfigure(0,weight=1)
-        self._tab=f
-        {"sysinfo":self._t_sysinfo,"repair":self._t_repair,"cleanup":self._t_cleanup,"deps":self._t_deps,
-         "apps":self._t_apps,"tweaks":self._t_tweaks,"dns":self._t_dns,
-         "updates":self._t_updates,"registry":self._t_registry,
-         "tools":self._t_tools,"restore":self._t_restore}[tid](f)
+    # ─── Tab routing ─────────────────────────────────────────────
+    def _show_tab(self, name: str):
+        # Clear header and content
+        for w in self._main.winfo_children():
+            info = w.grid_info()
+            if info.get("row") in ("0", "1", 0, 1):
+                w.destroy()
 
-    # helpers
-    def _hdr(s,p,t,sub="",r=0):
-        f=ctk.CTkFrame(p,fg_color="transparent"); f.grid(row=r,column=0,sticky="ew",pady=(0,8))
-        ctk.CTkLabel(f,text=t,font=ctk.CTkFont(family=FONT,size=18,weight="bold"),text_color=TXT).pack(anchor="w")
-        if sub: ctk.CTkLabel(f,text=sub,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT2).pack(anchor="w")
-    def _crd(s,p,r,**kw):
-        c=ctk.CTkFrame(p,fg_color=CARD,corner_radius=8,border_width=0); c.grid(row=r,column=0,sticky="ew",pady=kw.get("py",(0,6))); c.grid_columnconfigure(0,weight=1); return c
-    def _dk(s,h): return "#{:02x}{:02x}{:02x}".format(*[int(int(h[i:i+2],16)*0.7) for i in (1,3,5)])
-    def _op(s,fn): threading.Thread(target=lambda: fn(s._log),daemon=True).start()
-    def _tt(s,w,t): tip=ToolTip(w,t); s._tips.append(tip)
+        # Highlight nav button
+        for n, b in self._nav_btns.items():
+            b.configure(
+                fg_color=HOVER if n == name else "transparent",
+                text_color=TEXT if n == name else TEXT2
+            )
 
-    def _confirm(s,title,msg,danger=False):
-        d=ctk.CTkToplevel(s); d.title(title); d.geometry("480x210"); d.configure(fg_color=CARD)
-        d.grab_set(); ok=[False]
-        ctk.CTkLabel(d,text=title,font=ctk.CTkFont(family=FONT,size=15,weight="bold"),
-            text_color=DANGER if danger else TXT).pack(pady=(18,4))
-        ctk.CTkLabel(d,text=msg,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT2,wraplength=420,justify="center").pack(pady=6)
-        bf=ctk.CTkFrame(d,fg_color="transparent"); bf.pack(pady=10)
-        def y(): ok[0]=True; d.destroy()
-        ctk.CTkButton(bf,text="Yes",fg_color=DANGER if danger else ACCENT,hover_color=DANGER2 if danger else ACCENT2,
-            text_color="#fff",corner_radius=8,height=34,width=110,command=y).grid(row=0,column=0,padx=6)
-        ctk.CTkButton(bf,text="Cancel",fg_color=CARD2,hover_color=HOVER,text_color=TXT2,
-            corner_radius=8,height=34,width=90,command=d.destroy).grid(row=0,column=1,padx=6)
-        d.wait_window(); return ok[0]
+        # Page header
+        hdr = ctk.CTkFrame(self._main, fg_color=PANEL, corner_radius=8)
+        hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        ctk.CTkLabel(hdr, text=name,
+            font=ctk.CTkFont(family=FONT, size=16, weight="bold"),
+            text_color=TEXT).pack(side="left", padx=14, pady=10)
 
-    def _maybe_restore_point(s, label="WinForge Operation"):
-        """Smart restore point: asks user if one was already created this session."""
-        if was_restore_created_this_session():
-            return s._confirm("Restore Point", "A restore point was already created this session.\nCreate another one before proceeding?", False)
-        create_restore_point(label, s._log)
-        return True
+        # Scrollable content area
+        scroll = ctk.CTkScrollableFrame(self._main, fg_color=BG, scrollbar_button_color=CARD,
+                                        scrollbar_button_hover_color=HOVER)
+        scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
+        scroll.grid_columnconfigure(0, weight=1)
 
-    # ─── SYSTEM INFO ────────────────────────────────────────────────────────
-    def _t_sysinfo(s,p):
-        s._hdr(p,"System Info","Your hardware and system details.")
-        loading=s._crd(p,1)
-        ctk.CTkLabel(loading,text="Loading system information...",font=ctk.CTkFont(family=FONT,size=13),text_color=TXT2).grid(row=0,column=0,padx=12,pady=12,sticky="w")
-        def fetch():
-            info=get_system_info(s._log)
-            s.after(0,lambda: s._render_sysinfo(p,info))
-        threading.Thread(target=fetch,daemon=True).start()
+        builders = {
+            "System Info":       self._tab_sysinfo,
+            "Repair":            self._tab_repair,
+            "Cleanup":           self._tab_cleanup,
+            "Dependencies":      self._tab_deps,
+            "Install Apps":      self._tab_install,
+            "Tweaks & Debloat":  self._tab_tweaks,
+            "DNS Settings":      self._tab_dns,
+            "Win Updates":       self._tab_updates,
+            "Registry Health":   self._tab_registry,
+            "System Tools":      self._tab_systools,
+            "Restore Points":    self._tab_restore,
+        }
+        if name in builders:
+            builders[name](scroll)
 
-    def _render_sysinfo(s,p,info):
-        # Clear everything except header
-        children = p.winfo_children()
-        for w in children[1:]: w.destroy()
+    # ─── Helpers ─────────────────────────────────────────────────
+    def _card(self, parent, row: int, col: int = 0, colspan: int = 1, title: str = ""):
+        f = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8)
+        f.grid(row=row, column=col, columnspan=colspan, sticky="ew", padx=6, pady=5)
+        f.grid_columnconfigure(0, weight=1)
+        if title:
+            ctk.CTkLabel(f, text=title,
+                font=ctk.CTkFont(family=FONT, size=13, weight="bold"), text_color=TEXT
+                ).grid(row=0, column=0, padx=14, pady=(10, 4), sticky="w")
+        return f
 
-        sections=[
-            ("Operating System",[
-                ("OS",info.get("os_name","Unknown")),
-                ("Version",f"{info.get('os_build','?')} (Build {info.get('os_version','?')})"),
-                ("Architecture",info.get("os_arch","?")),
-                ("Installed",info.get("install_date","?")),
-                ("Uptime",info.get("uptime","?")),
+    def _btn(self, parent, text, command, color=ACCENT, row=0, col=0, pady=10, padx=14):
+        ctk.CTkButton(parent, text=text,
+            font=ctk.CTkFont(family=FONT, size=12, weight="bold"),
+            fg_color=color, hover_color=self._dk(color),
+            text_color="#fff", corner_radius=8, height=34, width=140,
+            command=command
+        ).grid(row=row, column=col, padx=padx, pady=pady, sticky="w")
+
+    def _dk(self, hex_color: str) -> str:
+        """Darken a hex color by ~15%"""
+        h = hex_color.lstrip("#")
+        r, g, b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+        return "#{:02x}{:02x}{:02x}".format(max(0,r-38), max(0,g-38), max(0,b-38))
+
+    def _run(self, fn, *args):
+        threading.Thread(target=fn, args=args, daemon=True).start()
+
+    def _lbl(self, parent, text, row, col=0, size=11, color=None, bold=False, pady=(2,2), padx=14):
+        ctk.CTkLabel(parent, text=text,
+            font=ctk.CTkFont(family=FONT, size=size, weight="bold" if bold else "normal"),
+            text_color=color or TEXT2, justify="left", wraplength=680
+        ).grid(row=row, column=col, padx=padx, pady=pady, sticky="w")
+
+    # ─────────────────────────────────────────────────────────────
+    # TAB: System Info
+    # ─────────────────────────────────────────────────────────────
+    def _tab_sysinfo(self, p):
+        p.grid_columnconfigure(0, weight=1)
+        card = self._card(p, 0, title="Loading system information...")
+
+        self._sysinfo_card = card
+        self._sysinfo_rows = []
+        self._run(self._load_sysinfo, card)
+
+    def _load_sysinfo(self, card):
+        info = get_system_info(self._log_line)
+        self.after(0, lambda: self._render_sysinfo(card, info))
+
+    def _render_sysinfo(self, card, info):
+        # Clear loading label
+        for w in card.winfo_children():
+            w.destroy()
+
+        ctk.CTkLabel(card, text="System Information",
+            font=ctk.CTkFont(family=FONT, size=13, weight="bold"), text_color=TEXT
+        ).grid(row=0, column=0, columnspan=2, padx=14, pady=(10,6), sticky="w")
+
+        sections = [
+            ("🖥️  Operating System", [
+                ("Name",          info.get("os_name","N/A")),
+                ("Version",       f"{info.get('os_version','N/A')} (Build {info.get('os_build','N/A')})"),
+                ("Architecture",  info.get("os_arch","N/A")),
+                ("Installed",     info.get("os_install","N/A")),
+                ("Uptime",        info.get("uptime","N/A")),
             ]),
-            ("Processor",[
-                ("CPU",info.get("cpu_name","Unknown")),
-                ("Cores / Threads",f"{info.get('cpu_cores','?')} cores / {info.get('cpu_threads','?')} threads"),
-                ("Max Clock",f"{info.get('cpu_clock','?')} GHz"),
+            ("⚙️  Processor", [
+                ("CPU",     info.get("cpu_name","N/A")),
+                ("Cores",   info.get("cpu_cores","N/A")),
+                ("Clock",   info.get("cpu_clock","N/A")),
             ]),
-            ("Memory",[
-                ("Total RAM",info.get("ram_total","?")),
-                ("Speed",info.get("ram_speed","?")),
-                ("Type",info.get("ram_type","?")),
-                ("Configuration",info.get("ram_sticks","?")),
+            ("🧠  Memory", [("RAM", info.get("ram","N/A"))]),
+            ("🎮  Graphics", [
+                ("GPU",    info.get("gpu","N/A")),
+                ("Driver", info.get("gpu_driver","N/A")),
             ]),
-            ("Graphics",[
-                ("GPU",info.get("gpu","Unknown")),
-                ("Driver Version",info.get("gpu_driver","?")),
+            ("💽  Storage", [
+                ("Disks",   info.get("disks","N/A")),
+                ("Volumes", info.get("volumes","N/A")),
             ]),
-            ("Storage",[
-                ("Drives",info.get("storage_drives","?")),
-                ("Partitions",info.get("partitions","?")),
+            ("🔌  Motherboard & BIOS", [
+                ("Board", info.get("motherboard","N/A")),
+                ("BIOS",  info.get("bios","N/A")),
             ]),
-            ("Motherboard & BIOS",[
-                ("Motherboard",info.get("motherboard","?")),
-                ("BIOS",info.get("bios","?")),
+            ("🔒  Security", [
+                ("Secure Boot", info.get("secure_boot","N/A")),
+                ("TPM",         info.get("tpm","N/A")),
+                ("Defender",    info.get("defender","N/A")),
             ]),
-            ("Security",[
-                ("Secure Boot",info.get("secure_boot","?")),
-                ("TPM",info.get("tpm","?")),
-                ("Windows Defender",info.get("defender","?")),
-                ("Definitions Updated",info.get("defender_updated","?")),
-            ]),
-            ("Network",[
-                ("Active Adapter",info.get("network_adapter","?")),
-                ("Link Speed",info.get("network_speed","?")),
-                ("MAC Address",info.get("mac","?")),
-            ]),
-            ("Power",[
-                ("Active Plan",info.get("power_plan","?")),
-            ]),
+            ("🌐  Network", [("Adapter", info.get("network","N/A"))]),
+            ("⚡  Power",   [("Plan",    info.get("power","N/A"))]),
         ]
-        row=1
-        LABEL_W = 180
-        for sect_name,fields in sections:
-            cd=ctk.CTkFrame(p,fg_color=CARD,corner_radius=8)
-            cd.grid(row=row,column=0,sticky="ew",pady=(0,4)); row+=1
-            cd.grid_columnconfigure(0,minsize=LABEL_W)
-            cd.grid_columnconfigure(1,weight=1)
-            ctk.CTkLabel(cd,text=sect_name,font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=ACCENT).grid(row=0,column=0,columnspan=2,padx=12,pady=(8,2),sticky="w")
-            for fi,(label,value) in enumerate(fields,1):
-                ctk.CTkLabel(cd,text=label,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT3,anchor="w").grid(row=fi,column=0,padx=(20,0),pady=2,sticky="w")
-                ctk.CTkLabel(cd,text=value,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT,anchor="w",wraplength=550,justify="left").grid(row=fi,column=1,padx=(0,12),pady=2,sticky="w")
-            ctk.CTkFrame(cd,fg_color=CARD,height=6).grid(row=99,column=0,columnspan=2,sticky="ew")
 
-        # Bind scroll to all children so scrolling works over cards
-        s._bind_scroll_recursive(p)
+        row = 1
+        for section_title, fields in sections:
+            ctk.CTkLabel(card, text=section_title,
+                font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
+                text_color=ACCENT
+            ).grid(row=row, column=0, columnspan=2, padx=14, pady=(10,2), sticky="w")
+            row += 1
+            for key, val in fields:
+                ctk.CTkLabel(card, text=key,
+                    font=ctk.CTkFont(family=FONT, size=11),
+                    text_color=TEXT3, width=120, anchor="w"
+                ).grid(row=row, column=0, padx=(20,0), pady=1, sticky="w")
+                ctk.CTkLabel(card, text=val,
+                    font=ctk.CTkFont(family=FONT, size=11),
+                    text_color=TEXT, anchor="w", wraplength=600
+                ).grid(row=row, column=1, padx=(4,14), pady=1, sticky="w")
+                row += 1
 
-        # Copy button
         def copy_all():
-            text=[]
-            for sect_name,fields in sections:
-                text.append(f"── {sect_name} ──")
-                for label,value in fields: text.append(f"  {label}: {value}")
-                text.append("")
-            s.clipboard_clear(); s.clipboard_append("\n".join(text))
-            s._log("[OK] System info copied to clipboard.")
-        ctk.CTkButton(p,text="Copy to Clipboard",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=34,width=160,command=copy_all).grid(row=row,column=0,pady=(6,4),sticky="w")
+            lines = ["WinForge System Information", "="*40]
+            for stitle, fields in sections:
+                lines.append(f"\n{stitle}")
+                for k, v in fields:
+                    lines.append(f"  {k}: {v}")
+            self.clipboard_clear()
+            self.clipboard_append("\n".join(lines))
+            self._log_line("[OK] System info copied to clipboard")
 
-    def _bind_scroll_recursive(s, widget):
-        """Bind mousewheel to all children so scrolling works over cards inside ScrollableFrame."""
-        try:
-            for child in widget.winfo_children():
-                child.bind("<MouseWheel>", lambda e: s._tab._parent_canvas.yview_scroll(-int(e.delta/120), "units"), add="+")
-                child.bind("<Button-4>", lambda e: s._tab._parent_canvas.yview_scroll(-1, "units"), add="+")
-                child.bind("<Button-5>", lambda e: s._tab._parent_canvas.yview_scroll(1, "units"), add="+")
-                s._bind_scroll_recursive(child)
-        except: pass
+        ctk.CTkButton(card, text="Copy to Clipboard",
+            font=ctk.CTkFont(family=FONT, size=12),
+            fg_color=ACCENT, hover_color=self._dk(ACCENT),
+            text_color="#fff", corner_radius=8, height=32,
+            command=copy_all
+        ).grid(row=row, column=0, columnspan=2, padx=14, pady=(14,12), sticky="w")
 
-    # ─── REPAIR ───────────────────────────────────────────────────────────────
-    def _t_repair(s,p):
-        s._hdr(p,"System Repair","Fix corrupted Windows files and components.")
-        for i,(t,d,fn,c) in enumerate([
-            ("DISM RestoreHealth","Repairs the component store. 5-15 min.",lambda: s._op(run_dism),ACCENT),
-            ("System File Checker","Scans and repairs system files. Run after DISM.",lambda: s._op(run_sfc),ACCENT),
-            ("Check Disk (CHKDSK)","Schedules disk check on next boot.",lambda: s._op(run_chkdsk),WARN),
-            ("Full Repair (DISM + SFC)","Creates restore point, runs DISM then SFC.",lambda: s._op(run_full_repair),OK),
-        ],1):
-            cd=s._crd(p,i); cd.grid_columnconfigure(0,weight=1)
-            ctk.CTkLabel(cd,text=t,font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=TXT).grid(row=0,column=0,padx=12,pady=(10,0),sticky="w")
-            ctk.CTkLabel(cd,text=d,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT2).grid(row=1,column=0,padx=12,pady=(2,0),sticky="w")
-            ctk.CTkButton(cd,text="Run",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=c,hover_color=s._dk(c),text_color="#fff",corner_radius=7,height=32,width=90,command=fn).grid(row=2,column=0,padx=12,pady=8,sticky="w")
+        ctk.CTkButton(card, text="Refresh",
+            font=ctk.CTkFont(family=FONT, size=11),
+            fg_color=CARD2, hover_color=HOVER,
+            text_color=TEXT2, corner_radius=8, height=32,
+            command=lambda: self._show_tab("System Info")
+        ).grid(row=row, column=0, columnspan=2, padx=(160,14), pady=(14,12), sticky="w")
 
-    # ─── CLEANUP (grid) ──────────────────────────────────────────────────────
-    def _t_cleanup(s,p):
-        s._hdr(p,"Cleanup","Free up disk space and clear cached junk.")
-        gf=ctk.CTkFrame(p,fg_color="transparent"); gf.grid(row=1,column=0,sticky="ew")
-        gf.grid_columnconfigure(0,weight=1); gf.grid_columnconfigure(1,weight=1)
-        for idx,(cid,(name,desc,danger)) in enumerate(CLEANUP_ITEMS.items()):
-            r,c=divmod(idx,2)
-            cd=ctk.CTkFrame(gf,fg_color=CARD,corner_radius=8); cd.grid(row=r,column=c,sticky="nsew",padx=3,pady=3); cd.grid_columnconfigure(0,weight=1)
-            tc=DANGER if danger else TXT; fc=DANGER if danger else ACCENT
-            ctk.CTkLabel(cd,text=name,font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=tc).grid(row=0,column=0,padx=12,pady=(10,0),sticky="w")
-            ctk.CTkLabel(cd,text=desc,font=ctk.CTkFont(family=FONT,size=10),text_color=TXT2,wraplength=280).grid(row=1,column=0,padx=12,pady=(2,0),sticky="w")
-            ctk.CTkButton(cd,text="Run",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=fc,hover_color=s._dk(fc),text_color="#fff",corner_radius=7,height=30,width=80,command=lambda k=cid: s._op(CLEANUP_FNS[k])).grid(row=2,column=0,padx=12,pady=8,sticky="w")
+    # ─────────────────────────────────────────────────────────────
+    # TAB: Repair
+    # ─────────────────────────────────────────────────────────────
+    def _tab_repair(self, p):
+        p.grid_columnconfigure(0, weight=1)
+        items = [
+            ("DISM — Repair Windows Image", "Repairs the Windows component store from Windows Update.\nFixes corrupted system files that SFC can't repair on its own.", run_dism, SUCCESS),
+            ("SFC — System File Checker",   "Scans and repairs corrupted Windows system files.\nRun after DISM for best results.", run_sfc, ACCENT),
+            ("CHKDSK — Check Disk",         "Checks your C: drive for errors and bad sectors.\nWill schedule for next reboot if drive is in use.", run_chkdsk, WARN),
+        ]
+        for i, (title, desc, fn, color) in enumerate(items):
+            card = self._card(p, i, title=title)
+            self._lbl(card, desc, 1)
+            self._btn(card, "Run", lambda f=fn: self._run(f, self._log_line), color=color, row=2)
 
-    # ─── DEPS (grid) ──────────────────────────────────────────────────────────
-    def _t_deps(s,p):
-        s._hdr(p,"Dependencies","Install common Windows runtimes via winget.")
-        gf=ctk.CTkFrame(p,fg_color="transparent"); gf.grid(row=1,column=0,sticky="ew")
-        for c in range(3): gf.grid_columnconfigure(c,weight=1)
-        for idx,(name,pkg) in enumerate(DEP_ITEMS):
-            r,c=divmod(idx,3)
-            cd=ctk.CTkFrame(gf,fg_color=CARD,corner_radius=8); cd.grid(row=r,column=c,sticky="nsew",padx=3,pady=3); cd.grid_columnconfigure(0,weight=1)
-            ctk.CTkLabel(cd,text=name,font=ctk.CTkFont(family=FONT,size=12,weight="bold"),text_color=TXT).grid(row=0,column=0,padx=10,pady=(10,2),sticky="w")
-            ctk.CTkLabel(cd,text=pkg,font=ctk.CTkFont(family=MONO,size=9),text_color=TXT3).grid(row=1,column=0,padx=10,sticky="w")
-            ctk.CTkButton(cd,text="Install",font=ctk.CTkFont(family=FONT,size=11,weight="bold"),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=28,width=70,command=lambda pk=pkg: s._op(lambda cb: install_winget_pkg(pk,cb))).grid(row=2,column=0,padx=10,pady=8,sticky="w")
+    # ─────────────────────────────────────────────────────────────
+    # TAB: Cleanup
+    # ─────────────────────────────────────────────────────────────
+    def _tab_cleanup(self, p):
+        p.grid_columnconfigure((0,1), weight=1)
+        items = [
+            ("🗑️ Temp Files",        "Clears %TEMP%, Windows\\Temp, and Prefetch.",               clean_temp,         0,0),
+            ("📦 Update Cache",      "Clears Windows Update download cache.",                      clean_update_cache, 0,1),
+            ("🌐 Flush DNS",         "Flushes the DNS resolver cache.",                            flush_dns,          1,0),
+            ("🔌 Reset Network",     "Resets TCP/IP stack, Winsock, firewall. Reboot needed.",     reset_network,      1,1),
+            ("🗂️ Recycle Bin",       "Empties the Recycle Bin.",                                   empty_recycle,      2,0),
+            ("📋 Event Logs",        "Clears all Windows event logs.",                             clean_event_logs,   2,1),
+        ]
+        for title, desc, fn, row, col in items:
+            card = self._card(p, row, col=col, title=title)
+            self._lbl(card, desc, 1)
+            self._btn(card, "Run", lambda f=fn: self._run(f, self._log_line), row=2)
 
-    # ─── APPS ─────────────────────────────────────────────────────────────────
-    def _t_apps(s,p):
-        s._hdr(p,"Install Apps","Select apps and install via winget or Chocolatey.")
-        ctrl=ctk.CTkFrame(p,fg_color=CARD,corner_radius=8); ctrl.grid(row=1,column=0,sticky="ew",pady=(0,6)); ctrl.grid_columnconfigure(1,weight=1)
-        ctk.CTkLabel(ctrl,text="Method:",font=ctk.CTkFont(family=FONT,size=12),text_color=TXT2).grid(row=0,column=0,padx=(12,6),pady=10)
-        s._method_var=ctk.StringVar(value="winget")
-        ctk.CTkSegmentedButton(ctrl,values=["winget","chocolatey"],variable=s._method_var,font=ctk.CTkFont(family=FONT,size=12),selected_color=ACCENT,selected_hover_color=ACCENT2).grid(row=0,column=1,padx=4,pady=10,sticky="w")
-        s._app_search=ctk.CTkEntry(ctrl,placeholder_text="Search apps...",font=ctk.CTkFont(family=FONT,size=12),fg_color=BG,border_color=BORD,text_color=TXT,width=220)
-        s._app_search.grid(row=0,column=2,padx=12,pady=10,sticky="e")
-        s._app_search.bind("<KeyRelease>",lambda e: s._filter_apps())
-        bf=ctk.CTkFrame(ctrl,fg_color="transparent"); bf.grid(row=0,column=3,padx=(0,12),pady=10)
-        ctk.CTkButton(bf,text="Install Selected",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=OK,hover_color=s._dk(OK),text_color="#fff",corner_radius=7,height=32,width=130,command=s._install_apps).pack(side="left",padx=(0,6))
-        ctk.CTkButton(bf,text="Clear",font=ctk.CTkFont(family=FONT,size=11),fg_color=CARD2,hover_color=HOVER,text_color=TXT3,corner_radius=7,height=32,width=60,command=lambda: [v.set(False) for v in s._avars.values()]).pack(side="left")
-        s._app_frame=ctk.CTkFrame(p,fg_color="transparent"); s._app_frame.grid(row=2,column=0,sticky="ew")
-        s._build_app_grid()
+    # ─────────────────────────────────────────────────────────────
+    # TAB: Dependencies
+    # ─────────────────────────────────────────────────────────────
+    def _tab_deps(self, p):
+        p.grid_columnconfigure((0,1,2), weight=1)
+        items = [
+            (".NET 6",       lambda: install_dotnet("6",  self._log_line), 0,0),
+            (".NET 7",       lambda: install_dotnet("7",  self._log_line), 0,1),
+            (".NET 8",       lambda: install_dotnet("8",  self._log_line), 0,2),
+            (".NET 9",       lambda: install_dotnet("9",  self._log_line), 1,0),
+            ("VC++ All",     lambda: install_vcredist(    self._log_line), 1,1),
+            ("DirectX",      lambda: install_directx(     self._log_line), 1,2),
+            ("WebView2",     lambda: install_webview2(    self._log_line), 2,0),
+            ("XNA Framework",lambda: install_xna(         self._log_line), 2,1),
+        ]
+        for title, fn, row, col in items:
+            card = self._card(p, row, col=col, title=title)
+            self._btn(card, "Install", lambda f=fn: self._run(f), row=1)
 
-    def _build_app_grid(s,filt=""):
-        for w in s._app_frame.winfo_children(): w.destroy()
-        for c in range(3): s._app_frame.grid_columnconfigure(c,weight=1)
-        cats={}
-        for name,info in APP_LIST.items():
-            if filt and filt.lower() not in name.lower(): continue
-            cats.setdefault(info["cat"],[]).append(name)
-        row=0
-        for cat in sorted(cats.keys()):
-            ctk.CTkLabel(s._app_frame,text=cat,font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=ACCENT).grid(row=row,column=0,columnspan=3,padx=4,pady=(8,4),sticky="w"); row+=1
-            for idx,name in enumerate(sorted(cats[cat])):
-                c=idx%3; r=row+idx//3
-                if name not in s._avars: s._avars[name]=ctk.BooleanVar(value=False)
-                ctk.CTkCheckBox(s._app_frame,text=name,variable=s._avars[name],font=ctk.CTkFont(family=FONT,size=12),text_color=TXT,fg_color=ACCENT,hover_color=ACCENT2,checkmark_color="#fff",border_color=BORD).grid(row=r,column=c,padx=6,pady=3,sticky="w")
-            row+=(len(cats[cat])+2)//3
-    def _filter_apps(s): s._build_app_grid(s._app_search.get())
-    def _install_apps(s):
-        sel=[n for n,v in s._avars.items() if v.get()]
-        if not sel: s._log("[WARN] No apps selected."); return
-        method=s._method_var.get()
-        def run():
-            s._log(f"[INFO] Checking {method} availability...")
-            if method=="winget":
-                if not check_winget(): s._log("[INFO] winget not found. Installing..."); install_winget_itself(s._log)
-            else:
-                if not check_choco(): s._log("[INFO] Chocolatey not found. Installing..."); install_choco_itself(s._log)
-            for name in sel: install_app(name,method,s._log)
-            s._log(f"[OK] Installed {len(sel)} app(s).")
-        threading.Thread(target=run,daemon=True).start()
+    # ─────────────────────────────────────────────────────────────
+    # TAB: Install Apps
+    # ─────────────────────────────────────────────────────────────
+    def _tab_install(self, p):
+        p.grid_columnconfigure(0, weight=1)
 
-    # ─── TWEAKS & DEBLOAT (merged) ────────────────────────────────────────────
-    def _t_tweaks(s,p):
-        s._hdr(p,"Tweaks & Debloat","Hover for details. Search, use presets, or pick individually.")
-        # Search + presets
-        ctrl=ctk.CTkFrame(p,fg_color=CARD,corner_radius=8); ctrl.grid(row=1,column=0,sticky="ew",pady=(0,6)); ctrl.grid_columnconfigure(1,weight=1)
-        s._tw_search=ctk.CTkEntry(ctrl,placeholder_text="Search tweaks...",font=ctk.CTkFont(family=FONT,size=12),fg_color=BG,border_color=BORD,text_color=TXT,width=220)
-        s._tw_search.grid(row=0,column=0,padx=12,pady=10)
-        s._tw_search.bind("<KeyRelease>",lambda e: s._filter_tweaks())
-        pf=ctk.CTkFrame(ctrl,fg_color="transparent"); pf.grid(row=0,column=1,padx=4,pady=10,sticky="w")
-        for i,(name,_) in enumerate(PRESETS.items()):
-            cols=[ACCENT,OK,WARN,PURPLE]; c=cols[i%4]
-            ctk.CTkButton(pf,text=name,font=ctk.CTkFont(family=FONT,size=11),fg_color=c,hover_color=s._dk(c),text_color="#fff",corner_radius=7,height=28,command=lambda n=name: s._load_preset(n)).pack(side="left",padx=2)
-        bf=ctk.CTkFrame(ctrl,fg_color="transparent"); bf.grid(row=0,column=2,padx=12,pady=10)
-        ctk.CTkButton(bf,text="Apply",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=OK,hover_color=s._dk(OK),text_color="#fff",corner_radius=7,height=30,width=80,command=s._apply_tweaks).pack(side="left",padx=(0,4))
-        ctk.CTkButton(bf,text="Clear",font=ctk.CTkFont(family=FONT,size=11),fg_color=CARD2,hover_color=HOVER,text_color=TXT3,corner_radius=7,height=30,width=55,command=lambda: [v.set(False) for v in s._tvars.values()]).pack(side="left")
+        APP_LIST = {
+            "Browsers":        [("Firefox","Mozilla.Firefox"),("Chrome","Google.Chrome"),("Brave","Brave.Brave"),("Vivaldi","Vivaldi.Vivaldi")],
+            "Communication":   [("Discord","Discord.Discord"),("Slack","SlackTechnologies.Slack"),("Teams","Microsoft.Teams"),("Telegram","Telegram.TelegramDesktop")],
+            "Media":           [("VLC","VideoLAN.VLC"),("MPV","mpv.mpv"),("Spotify","Spotify.Spotify"),("HandBrake","HandBrake.HandBrake")],
+            "Gaming":          [("Steam","Valve.Steam"),("Epic Games","EpicGames.EpicGamesLauncher"),("GOG Galaxy","GOG.Galaxy"),("Playnite","Playnite.Playnite")],
+            "Development":     [("VS Code","Microsoft.VisualStudioCode"),("Git","Git.Git"),("Python","Python.Python.3"),("Node.js","OpenJS.NodeJS")],
+            "Productivity":    [("Notion","Notion.Notion"),("Obsidian","Obsidian.Obsidian"),("7-Zip","7zip.7zip"),("ShareX","ShareX.ShareX")],
+            "Utilities":       [("PowerToys","Microsoft.PowerToys"),("Bulk Rename Utility","TGRMNSoftware.BulkRenameUtility"),("CPU-Z","CPUID.CPU-Z"),("GPU-Z","TechPowerUp.GPU-Z")],
+        }
 
-        s._tw_frame=ctk.CTkFrame(p,fg_color="transparent"); s._tw_frame.grid(row=2,column=0,sticky="ew")
-        s._build_tweak_grid()
+        # Manager selector
+        mgr_frame = ctk.CTkFrame(p, fg_color=CARD, corner_radius=8)
+        mgr_frame.grid(row=0, column=0, sticky="ew", padx=6, pady=5)
+        ctk.CTkLabel(mgr_frame, text="Package Manager:",
+            font=ctk.CTkFont(family=FONT, size=12), text_color=TEXT2
+        ).pack(side="left", padx=14, pady=10)
+        self._mgr_var = ctk.StringVar(value="winget")
+        for m in ("winget", "chocolatey"):
+            ctk.CTkRadioButton(mgr_frame, text=m, variable=self._mgr_var, value=m.split()[0],
+                font=ctk.CTkFont(family=FONT, size=12), text_color=TEXT,
+                fg_color=ACCENT, hover_color=self._dk(ACCENT)
+            ).pack(side="left", padx=10, pady=10)
 
-        # Browser debloat section
-        bc=s._crd(p,3)
-        ctk.CTkLabel(bc,text="Browser Debloat",font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=ACCENT).grid(row=0,column=0,columnspan=2,padx=12,pady=(10,4),sticky="w")
-        ctk.CTkLabel(bc,text="Disables telemetry, bloat, and tracking. Uses exact WinUtil registry entries.",font=ctk.CTkFont(family=FONT,size=10),text_color=TXT2).grid(row=1,column=0,columnspan=2,padx=12,pady=(0,6),sticky="w")
-        bc.grid_columnconfigure(0,weight=1); bc.grid_columnconfigure(1,weight=1)
-        ctk.CTkButton(bc,text="Debloat Edge (17 entries)",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=30,command=lambda: s._op(debloat_edge)).grid(row=2,column=0,padx=12,pady=8,sticky="w")
-        ctk.CTkButton(bc,text="Debloat Brave (12 entries)",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=30,command=lambda: s._op(debloat_brave)).grid(row=2,column=1,padx=12,pady=8,sticky="w")
+        # Search
+        search_frame = ctk.CTkFrame(p, fg_color=CARD, corner_radius=8)
+        search_frame.grid(row=1, column=0, sticky="ew", padx=6, pady=5)
+        search_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(search_frame, text="Search:", font=ctk.CTkFont(family=FONT, size=12), text_color=TEXT2
+        ).grid(row=0, column=0, padx=14, pady=10)
+        self._app_search = ctk.CTkEntry(search_frame, font=ctk.CTkFont(family=FONT, size=12),
+            fg_color=BG, border_color=BORDER, text_color=TEXT, placeholder_text="Filter apps...")
+        self._app_search.grid(row=0, column=1, padx=(0,14), pady=10, sticky="ew")
+        self._app_search.bind("<KeyRelease>", lambda e: self._refresh_apps())
+        self._app_list_parent = p
+        self._app_list_data   = APP_LIST
+        self._app_list_start_row = 2
+        self._app_list_widgets = []
+        self._refresh_apps()
 
-        # App removal (debloat merged here)
-        s._bvars={}
-        for section_title,apps,is_danger,row in [
-            ("App Removal  —  Safe",{k:v for k,v in BLOATWARE.items() if not v[1]},False,4),
-            ("App Removal  —  CAUTION",{k:v for k,v in BLOATWARE.items() if v[1]},True,5),]:
-            sc=s._crd(p,row)
-            lc=DANGER if is_danger else ACCENT
-            ctk.CTkLabel(sc,text=section_title,font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=lc).grid(row=0,column=0,columnspan=2,padx=12,pady=(10,6),sticky="w")
-            sc.grid_columnconfigure(0,weight=1); sc.grid_columnconfigure(1,weight=1)
-            for idx,(pkg,(name,_,tip)) in enumerate(apps.items()):
-                c=idx%2; r=(idx//2)+1
-                s._bvars[pkg]=ctk.BooleanVar(value=False)
-                fc=DANGER if is_danger else ACCENT
-                cb=ctk.CTkCheckBox(sc,text=name,variable=s._bvars[pkg],font=ctk.CTkFont(family=FONT,size=12),text_color=DANGER if is_danger else TXT,fg_color=fc,hover_color=s._dk(fc),checkmark_color="#fff",border_color=BORD)
-                cb.grid(row=r,column=c,padx=10,pady=3,sticky="w"); s._tt(cb,tip)
-            ctk.CTkFrame(sc,fg_color="transparent",height=4).grid(row=999,column=0)
+    def _refresh_apps(self):
+        query = self._app_search.get().lower() if hasattr(self, "_app_search") else ""
+        for w in self._app_list_widgets:
+            try: w.destroy()
+            except: pass
+        self._app_list_widgets.clear()
 
-        dbf=ctk.CTkFrame(p,fg_color="transparent"); dbf.grid(row=6,column=0,sticky="ew",pady=(4,0))
-        ctk.CTkButton(dbf,text="Select All Safe",font=ctk.CTkFont(family=FONT,size=11),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=30,command=lambda: [s._bvars[k].set(True) for k in BLOATWARE if not BLOATWARE[k][1]]).grid(row=0,column=0,padx=(0,6))
-        ctk.CTkButton(dbf,text="Clear Apps",font=ctk.CTkFont(family=FONT,size=11),fg_color=CARD2,hover_color=HOVER,text_color=TXT3,corner_radius=7,height=30,command=lambda: [v.set(False) for v in s._bvars.values()]).grid(row=0,column=1,padx=(0,6))
-        ctk.CTkButton(dbf,text="Remove Selected Apps",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=DANGER,hover_color=DANGER2,text_color="#fff",corner_radius=7,height=34,width=180,command=s._run_debloat).grid(row=0,column=2)
+        row = self._app_list_start_row
+        for cat, apps in self._app_list_data.items():
+            filtered = [(name, pkg) for name, pkg in apps if not query or query in name.lower()]
+            if not filtered: continue
 
-    def _build_tweak_grid(s,filt=""):
-        for w in s._tw_frame.winfo_children(): w.destroy()
-        s._tw_frame.grid_columnconfigure(0,weight=1); s._tw_frame.grid_columnconfigure(1,weight=1)
-        row=0
-        for sect,cat,color in [("Essential Tweaks","essential",ACCENT),("Advanced Tweaks  —  CAUTION","advanced",DANGER),("Preferences","preference",PURPLE)]:
-            items=[(k,v) for k,v in TWEAKS.items() if v["cat"]==cat and (not filt or filt.lower() in v["label"].lower())]
-            if not items: continue
-            ctk.CTkLabel(s._tw_frame,text=sect,font=ctk.CTkFont(family=FONT,size=14,weight="bold"),text_color=color).grid(row=row,column=0,columnspan=2,padx=4,pady=(8,4),sticky="w"); row+=1
-            for idx,(tid,td) in enumerate(items):
-                c=idx%2; r=row+idx//2
-                if tid not in s._tvars: s._tvars[tid]=ctk.BooleanVar(value=False)
-                fc=DANGER if td["danger"] else ACCENT
-                cb=ctk.CTkCheckBox(s._tw_frame,text=td["label"],variable=s._tvars[tid],font=ctk.CTkFont(family=FONT,size=12),text_color=DANGER if td["danger"] else TXT,fg_color=fc,hover_color=s._dk(fc),checkmark_color="#fff",border_color=BORD)
-                cb.grid(row=r,column=c,padx=10,pady=4,sticky="w"); s._tt(cb,td["tip"])
-            row+=(len(items)+1)//2
-    def _filter_tweaks(s): s._build_tweak_grid(s._tw_search.get())
-    def _load_preset(s,name):
-        sel=PRESETS.get(name,{}).get("tweaks",[])
-        for tid,var in s._tvars.items(): var.set(tid in sel)
-        s._log(f"[INFO] Preset '{name}' loaded.")
-    def _apply_tweaks(s):
-        sel=[t for t,v in s._tvars.items() if v.get()]
-        if not sel: s._log("[WARN] No tweaks selected."); return
-        danger=[t for t in sel if TWEAKS[t]["danger"]]
-        if danger:
-            labels=", ".join(TWEAKS[t]["label"] for t in danger)
-            if not s._confirm("Dangerous Tweaks",f"These are marked dangerous:\n{labels}\n\nRestore point will be created. Continue?",True): return
-        def run():
-            s._maybe_restore_point("WinForge Tweaks")
-            for tid in sel: TWEAKS[tid]["fn"](s._log)
-            s._log(f"[OK] {len(sel)} tweak(s) applied.")
-        threading.Thread(target=run,daemon=True).start()
+            cat_lbl = ctk.CTkLabel(self._app_list_parent, text=cat,
+                font=ctk.CTkFont(family=FONT, size=12, weight="bold"), text_color=ACCENT)
+            cat_lbl.grid(row=row, column=0, padx=14, pady=(10,2), sticky="w")
+            self._app_list_widgets.append(cat_lbl)
+            row += 1
 
-    def _run_debloat(s):
-        sel=[p for p,v in s._bvars.items() if v.get()]
-        if not sel: s._log("[WARN] No apps selected."); return
-        names=", ".join(BLOATWARE[p][0] for p in sel)
-        if not s._confirm("Confirm Removal",f"Remove {len(sel)} app(s)?\n{names[:250]}{'...' if len(names)>250 else ''}",any(BLOATWARE[p][1] for p in sel)): return
-        def run():
-            s._maybe_restore_point("WinForge Debloat")
-            for pkg in sel: remove_app(pkg,s._log)
-            s._log(f"[OK] Debloat complete.")
-        threading.Thread(target=run,daemon=True).start()
+            grid_f = ctk.CTkFrame(self._app_list_parent, fg_color=CARD, corner_radius=8)
+            grid_f.grid(row=row, column=0, sticky="ew", padx=6, pady=2)
+            self._app_list_widgets.append(grid_f)
+            for col_count in range(4):
+                grid_f.grid_columnconfigure(col_count, weight=1)
 
-    # ─── DNS ──────────────────────────────────────────────────────────────────
-    def _t_dns(s,p):
-        s._hdr(p,"DNS Settings","Choose a DNS server for all active network adapters.")
-        s._dns_var=ctk.StringVar(value="Cloudflare (1.1.1.1)")
-        gf=ctk.CTkFrame(p,fg_color="transparent"); gf.grid(row=1,column=0,sticky="ew")
-        for c in range(2): gf.grid_columnconfigure(c,weight=1)
-        dns_info={"Cloudflare (1.1.1.1)":"Fast, privacy-focused, no logging.","Google (8.8.8.8)":"Reliable. Google logs queries.","Quad9 (9.9.9.9)":"Blocks malware domains. Privacy-focused.","OpenDNS (208.67.222.222)":"Cisco-owned. Optional content filtering.","AdGuard (94.140.14.14)":"Blocks ads and trackers at DNS level.","Cloudflare Family (1.1.1.3)":"Cloudflare + blocks malware/adult.","Automatic (DHCP)":"Uses router/ISP default."}
-        for idx,(name,(pri,sec)) in enumerate(DNS_SERVERS.items()):
-            r,c=divmod(idx,2)
-            cd=ctk.CTkFrame(gf,fg_color=CARD,corner_radius=8); cd.grid(row=r,column=c,sticky="nsew",padx=3,pady=3); cd.grid_columnconfigure(1,weight=1)
-            ctk.CTkRadioButton(cd,text=name,variable=s._dns_var,value=name,font=ctk.CTkFont(family=FONT,size=12,weight="bold"),text_color=TXT,fg_color=ACCENT,border_color=BORD).grid(row=0,column=0,columnspan=2,padx=12,pady=(10,0),sticky="w")
-            ctk.CTkLabel(cd,text=f"{pri}, {sec}" if pri else "Automatic",font=ctk.CTkFont(family=MONO,size=10),text_color=TXT3).grid(row=1,column=0,columnspan=2,padx=28,sticky="w")
-            ctk.CTkLabel(cd,text=dns_info.get(name,""),font=ctk.CTkFont(family=FONT,size=10),text_color=TXT2,wraplength=280).grid(row=2,column=0,columnspan=2,padx=28,pady=(2,10),sticky="w")
-        ctk.CTkButton(p,text="Apply DNS",font=ctk.CTkFont(family=FONT,size=13,weight="bold"),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=36,width=140,command=lambda: s._op(lambda cb: set_dns(s._dns_var.get(),cb))).grid(row=2,column=0,pady=(8,4),sticky="w")
+            for idx, (name, pkg) in enumerate(filtered):
+                col = idx % 4
+                row_in = idx // 4
+                btn = ctk.CTkButton(grid_f, text=name,
+                    font=ctk.CTkFont(family=FONT, size=11),
+                    fg_color=CARD2, hover_color=HOVER, text_color=TEXT,
+                    corner_radius=6, height=32,
+                    command=lambda n=name, pk=pkg: self._run(install_app, pk, self._mgr_var.get(), self._log_line))
+                btn.grid(row=row_in, column=col, padx=4, pady=4, sticky="ew")
+            row += 1
 
-    # ─── UPDATES ──────────────────────────────────────────────────────────────
-    def _t_updates(s,p):
-        s._hdr(p,"Windows Updates","Control how Windows installs updates.")
-        for i,(t,col,dan,d,cmd) in enumerate([
-            ("Default Settings",ACCENT,False,"Resets Windows Update to defaults.\nRemoves all custom policies.",lambda: s._op(updates_default)),
-            ("Security Settings",OK,False,"Feature updates delayed 365 days.\nSecurity after 4 days. No driver updates.\nNote: Pro/Enterprise only.",lambda: s._op(updates_security)),
-            ("Disable All Updates",DANGER,True,"NOT RECOMMENDED\nDisables ALL updates. Security risk.\nOnly for isolated/test systems.",lambda: s._op(updates_disable)),],1):
-            cd=s._crd(p,i); cd.grid_columnconfigure(0,weight=1)
-            ctk.CTkLabel(cd,text=t,font=ctk.CTkFont(family=FONT,size=14,weight="bold"),text_color=DANGER if dan else TXT).grid(row=0,column=0,padx=12,pady=(10,2),sticky="w")
-            ctk.CTkLabel(cd,text=d,font=ctk.CTkFont(family=FONT,size=11),text_color=WARN if dan else TXT2,justify="left").grid(row=1,column=0,padx=12,sticky="w")
-            fc=DANGER if dan else col
-            ctk.CTkButton(cd,text="Apply",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=fc,hover_color=s._dk(fc),text_color="#fff",corner_radius=7,height=30,width=90,command=cmd).grid(row=2,column=0,padx=12,pady=8,sticky="w")
+    # ─────────────────────────────────────────────────────────────
+    # TAB: Tweaks & Debloat
+    # ─────────────────────────────────────────────────────────────
+    def _tab_tweaks(self, p):
+        p.grid_columnconfigure(0, weight=1)
 
-    # ─── REGISTRY HEALTH ─────────────────────────────────────────────────────
-    def _t_registry(s,p):
-        s._hdr(p,"Registry Health","Safe registry maintenance. Backs up before any changes.")
-        info=s._crd(p,1)
-        ctk.CTkLabel(info,text="Only performs targeted, safe operations. Always backs up before cleaning.\nDoes NOT scan for 'invalid paths' or COM references — that's where damage happens.",font=ctk.CTkFont(family=FONT,size=11),text_color=TXT2,justify="left",wraplength=600).grid(row=0,column=0,padx=12,pady=10,sticky="w")
+        # ── Essential Tweaks ──
+        ess = self._card(p, 0, title="⚡ Essential Tweaks")
+        tweaks_essential = [
+            ("Disable Telemetry",           "WinUtil-verified: 12 registry keys + services. Disables all MS data collection.",
+             lambda: self._run(tweak_telemetry, False, self._log_line),
+             lambda: self._run(tweak_telemetry, True,  self._log_line)),
+            ("Disable Activity History",    "WinUtil-verified: 3 registry keys. Stops Windows logging your activity.",
+             lambda: self._run(tweak_activity_history, False, self._log_line),
+             lambda: self._run(tweak_activity_history, True,  self._log_line)),
+            ("Disable Location Tracking",   "WinUtil-verified: 3 registry keys + lfsvc service.",
+             lambda: self._run(tweak_location, False, self._log_line),
+             lambda: self._run(tweak_location, True,  self._log_line)),
+            ("Disable Consumer Features",   "Stops Windows silently installing suggested apps and ads.",
+             lambda: self._run(tweak_consumer_features, False, self._log_line),
+             lambda: self._run(tweak_consumer_features, True,  self._log_line)),
+            ("Disable Hibernation",         "Frees up ~4GB on your C: drive (hiberfil.sys). Safe if you don't use Sleep.",
+             lambda: self._run(tweak_hibernation, False, self._log_line),
+             lambda: self._run(tweak_hibernation, True,  self._log_line)),
+            ("Disable Copilot",             "Removes Microsoft Copilot from taskbar and system.",
+             lambda: self._run(tweak_copilot, False, self._log_line),
+             lambda: self._run(tweak_copilot, True,  self._log_line)),
+            ("Remove Widgets",              "WinUtil-verified: removes WebExperience + WidgetsPlatformRuntime AppX packages.",
+             lambda: self._run(tweak_widgets, True,  self._log_line),
+             lambda: self._run(tweak_widgets, False, self._log_line)),
+            ("Optimize Services",           "Sets ~100 non-essential services to Manual. Speeds up boot. WinUtil list.",
+             lambda: self._run(tweak_services, True,  self._log_line),
+             lambda: self._run(tweak_services, False, self._log_line)),
+        ]
+        for i, (name, desc, apply_fn, undo_fn) in enumerate(tweaks_essential):
+            row_base = (i * 3) + 1
+            ctk.CTkLabel(ess, text=name,
+                font=ctk.CTkFont(family=FONT, size=12, weight="bold"), text_color=TEXT
+            ).grid(row=row_base, column=0, padx=14, pady=(8,0), sticky="w")
+            ctk.CTkLabel(ess, text=desc,
+                font=ctk.CTkFont(family=FONT, size=10), text_color=TEXT2, wraplength=640
+            ).grid(row=row_base+1, column=0, padx=14, pady=(0,2), sticky="w")
+            bf = ctk.CTkFrame(ess, fg_color="transparent")
+            bf.grid(row=row_base+2, column=0, padx=10, pady=(0,4), sticky="w")
+            ctk.CTkButton(bf, text="Apply", width=90, height=28,
+                font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
+                fg_color=SUCCESS, hover_color=self._dk(SUCCESS), text_color="#fff",
+                corner_radius=6, command=apply_fn).pack(side="left", padx=(0,6))
+            ctk.CTkButton(bf, text="Undo", width=80, height=28,
+                font=ctk.CTkFont(family=FONT, size=11),
+                fg_color=CARD2, hover_color=HOVER, text_color=TEXT2,
+                corner_radius=6, command=undo_fn).pack(side="left")
 
-        cd1=s._crd(p,2)
-        ctk.CTkLabel(cd1,text="Broken Uninstall Entries",font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=TXT).grid(row=0,column=0,padx=12,pady=(10,0),sticky="w")
-        ctk.CTkLabel(cd1,text="Finds programs in Add/Remove Programs whose install folder no longer exists on disk.",font=ctk.CTkFont(family=FONT,size=11),text_color=TXT2,wraplength=500).grid(row=1,column=0,padx=12,pady=(2,0),sticky="w")
-        ctk.CTkButton(cd1,text="Scan",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=30,width=80,command=s._scan_broken).grid(row=2,column=0,padx=12,pady=8,sticky="w")
+        # ── Preference Tweaks ──
+        pref = self._card(p, 1, title="🎛️ Preferences")
+        prefs = [
+            ("Show File Extensions",  lambda: self._run(tweak_show_extensions, True,  self._log_line), lambda: self._run(tweak_show_extensions, False, self._log_line)),
+            ("Show Hidden Files",     lambda: self._run(tweak_show_hidden,     True,  self._log_line), lambda: self._run(tweak_show_hidden,     False, self._log_line)),
+            ("NumLock on Startup",    lambda: self._run(tweak_num_lock,        True,  self._log_line), lambda: self._run(tweak_num_lock,        False, self._log_line)),
+            ("Verbose Logon Messages",lambda: self._run(tweak_verbose_logon,   True,  self._log_line), lambda: self._run(tweak_verbose_logon,   False, self._log_line)),
+            ("Enable Fast Startup",   lambda: self._run(tweak_fast_startup,    True,  self._log_line), lambda: self._run(tweak_fast_startup,    False, self._log_line)),
+            ("Dark Mode",             lambda: self._run(tweak_dark_mode,       True,  self._log_line), lambda: self._run(tweak_dark_mode,       False, self._log_line)),
+        ]
+        for i, (name, apply_fn, undo_fn) in enumerate(prefs):
+            row_base = (i * 2) + 1
+            ctk.CTkLabel(pref, text=name,
+                font=ctk.CTkFont(family=FONT, size=12), text_color=TEXT
+            ).grid(row=row_base, column=0, padx=14, pady=(6,2), sticky="w")
+            bf = ctk.CTkFrame(pref, fg_color="transparent")
+            bf.grid(row=row_base+1, column=0, padx=10, pady=(0,2), sticky="w")
+            ctk.CTkButton(bf, text="Apply", width=90, height=26,
+                fg_color=SUCCESS, hover_color=self._dk(SUCCESS), text_color="#fff",
+                font=ctk.CTkFont(family=FONT, size=11), corner_radius=6, command=apply_fn
+            ).pack(side="left", padx=(0,6))
+            ctk.CTkButton(bf, text="Undo",  width=80, height=26,
+                fg_color=CARD2, hover_color=HOVER, text_color=TEXT2,
+                font=ctk.CTkFont(family=FONT, size=11), corner_radius=6, command=undo_fn
+            ).pack(side="left")
 
-        cd2=s._crd(p,3)
-        ctk.CTkLabel(cd2,text="Empty Registry Keys",font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=TXT).grid(row=0,column=0,padx=12,pady=(10,0),sticky="w")
-        ctk.CTkLabel(cd2,text="Finds completely empty keys left behind by uninstalled software. Very low risk.",font=ctk.CTkFont(family=FONT,size=11),text_color=TXT2,wraplength=500).grid(row=1,column=0,padx=12,pady=(2,0),sticky="w")
-        ctk.CTkButton(cd2,text="Scan",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=30,width=80,command=s._scan_empty).grid(row=2,column=0,padx=12,pady=8,sticky="w")
+        # ── Power Plans ──
+        pw = self._card(p, 2, title="⚡ Power Plan")
+        ctk.CTkLabel(pw, text="Ultimate Performance uses WinUtil's exact method (powercfg -duplicatescheme). Balanced restores Windows default.",
+            font=ctk.CTkFont(family=FONT, size=10), text_color=TEXT2
+        ).grid(row=1, column=0, columnspan=3, padx=14, pady=(0,6), sticky="w")
+        for i, (name, plan) in enumerate([("Ultimate Performance","ultimate"),("Balanced (Default)","balanced"),("Power Saver","power_saver")]):
+            ctk.CTkButton(pw, text=name, width=160, height=30,
+                font=ctk.CTkFont(family=FONT, size=11),
+                fg_color=CARD2, hover_color=HOVER, text_color=TEXT,
+                corner_radius=6,
+                command=lambda pl=plan: self._run(tweak_power_plan, pl, self._log_line)
+            ).grid(row=2, column=i, padx=(14 if i==0 else 4, 4), pady=10, sticky="w")
 
-    def _scan_broken(s):
-        def run():
-            results=registry_scan_broken_uninstalls(s._log)
-            if not results:
-                s._log("[OK] No broken uninstall entries found. Registry is clean.")
-                return
-            s._log(f"[INFO] Found {len(results)} broken entries:")
-            for r in results: s._log(f"  - {r['name']} (path: {r['path']})")
-            # Ask to clean
-            s.after(0, lambda: s._ask_clean_broken(results))
-        threading.Thread(target=run,daemon=True).start()
+        # ── Browser Debloat ──
+        br = self._card(p, 3, title="🌐 Browser Debloat")
+        ctk.CTkLabel(br, text="Applies WinUtil-verified registry policies to disable telemetry, sponsored content, and unnecessary features.",
+            font=ctk.CTkFont(family=FONT, size=10), text_color=TEXT2
+        ).grid(row=1, column=0, padx=14, pady=(0,6), sticky="w")
+        bf2 = ctk.CTkFrame(br, fg_color="transparent")
+        bf2.grid(row=2, column=0, padx=10, pady=(0,12), sticky="w")
+        ctk.CTkButton(bf2, text="Debloat Edge",  width=130, height=32,
+            fg_color=ACCENT, hover_color=self._dk(ACCENT), text_color="#fff",
+            font=ctk.CTkFont(family=FONT, size=11), corner_radius=6,
+            command=lambda: self._run(debloat_edge, self._log_line)
+        ).pack(side="left", padx=(0,8))
+        ctk.CTkButton(bf2, text="Debloat Brave", width=130, height=32,
+            fg_color=PURPLE, hover_color=self._dk(PURPLE), text_color="#fff",
+            font=ctk.CTkFont(family=FONT, size=11), corner_radius=6,
+            command=lambda: self._run(debloat_brave, self._log_line)
+        ).pack(side="left")
 
-    def _ask_clean_broken(s,results):
-        names = ", ".join(r["name"] for r in results[:10])
-        if s._confirm("Clean Broken Entries",f"Remove {len(results)} broken uninstall entries?\n{names}{'...' if len(results)>10 else ''}\n\nRegistry will be backed up first."):
-            def run():
-                registry_backup(s._log)
-                registry_clean_broken_uninstalls([r["key"] for r in results],s._log)
-            threading.Thread(target=run,daemon=True).start()
+        # ── App Removal ──
+        rm = self._card(p, 4, title="🗑️ Remove Bloatware Apps")
+        ctk.CTkLabel(rm, text="Checks if each app is installed before attempting removal. Creates a restore point this session if not already done.",
+            font=ctk.CTkFont(family=FONT, size=10), text_color=TEXT2
+        ).grid(row=1, column=0, padx=14, pady=(0,6), sticky="w")
 
-    def _scan_empty(s):
-        def run():
-            results=registry_scan_empty_keys(s._log)
-            if not results:
-                s._log("[OK] No empty registry keys found.")
-                return
-            s._log(f"[INFO] Found {len(results)} empty keys.")
-            s.after(0, lambda: s._ask_clean_empty(results))
-        threading.Thread(target=run,daemon=True).start()
+        bloatware = [
+            ("Cortana",          "Microsoft.549981C3F5F10"),
+            ("Xbox Apps",        "Microsoft.XboxApp"),
+            ("Mixed Reality",    "Microsoft.MixedReality.Portal"),
+            ("3D Viewer",        "Microsoft.Microsoft3DViewer"),
+            ("Paint 3D",         "Microsoft.MSPaint"),
+            ("Movies & TV",      "Microsoft.ZuneVideo"),
+            ("Groove Music",     "Microsoft.ZuneMusic"),
+            ("Your Phone",       "Microsoft.YourPhone"),
+            ("Tips",             "Microsoft.Getstarted"),
+            ("Solitaire",        "Microsoft.MicrosoftSolitaireCollection"),
+            ("News",             "Microsoft.BingNews"),
+            ("Weather",          "Microsoft.BingWeather"),
+            ("Maps",             "Microsoft.WindowsMaps"),
+            ("People",           "Microsoft.People"),
+            ("Feedback Hub",     "Microsoft.WindowsFeedbackHub"),
+            ("Teams (Personal)", "MicrosoftTeams"),
+            ("OneDrive",         "Microsoft.OneDriveSync"),
+            ("Bing Search",      "Microsoft.BingSearch"),
+        ]
+        rm.grid_columnconfigure((0,1,2,3), weight=1)
+        for i, (name, pkg) in enumerate(bloatware):
+            row = (i // 4) + 2
+            col = i % 4
+            ctk.CTkButton(rm, text=f"Remove {name}", height=28,
+                font=ctk.CTkFont(family=FONT, size=10),
+                fg_color=CARD2, hover_color="#5c1a1a", text_color=TEXT,
+                corner_radius=6,
+                command=lambda n=name, pk=pkg: self._remove_with_rp(n, pk)
+            ).grid(row=row, column=col, padx=4, pady=4, sticky="ew")
 
-    def _ask_clean_empty(s,results):
-        if s._confirm("Clean Empty Keys",f"Remove {len(results)} empty registry keys?\n\nRegistry will be backed up first."):
-            def run():
-                registry_backup(s._log)
-                registry_clean_empty_keys(results,s._log)
-            threading.Thread(target=run,daemon=True).start()
+    def _remove_with_rp(self, name: str, pkg: str):
+        """Create a restore point the first time per session, then remove the app."""
+        def _do():
+            if not self._restore_point_this_session:
+                self._log_line("[INFO] Creating session restore point before first removal...")
+                create_restore_point("WinForge App Removal", self._log_line)
+                self._restore_point_this_session = True
+            remove_app(pkg, name, self._log_line)
+        threading.Thread(target=_do, daemon=True).start()
 
-    # ─── TOOLS ────────────────────────────────────────────────────────────────
-    def _t_tools(s,p):
-        s._hdr(p,"System Tools","Quick access to legacy Windows panels.")
-        cd=s._crd(p,1)
-        ctk.CTkLabel(cd,text="Legacy Windows Panels",font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=ACCENT).grid(row=0,column=0,columnspan=3,padx=12,pady=(10,6),sticky="w")
-        for c in range(3): cd.grid_columnconfigure(c,weight=1)
-        for idx,(name,cmd) in enumerate(PANELS):
-            r,c=1+idx//3,idx%3
-            ctk.CTkButton(cd,text=name,font=ctk.CTkFont(family=FONT,size=11),fg_color=CARD2,hover_color=HOVER,text_color=TXT,corner_radius=7,height=34,command=lambda cc=cmd: s._op(lambda cb: open_panel(cc,cb))).grid(row=r,column=c,padx=4,pady=3,sticky="ew")
-        # Padding to prevent artifact below last row
-        ctk.CTkFrame(cd,fg_color=CARD,height=6).grid(row=99,column=0,columnspan=3,sticky="ew")
+    # ─────────────────────────────────────────────────────────────
+    # TAB: DNS Settings
+    # ─────────────────────────────────────────────────────────────
+    def _tab_dns(self, p):
+        p.grid_columnconfigure(0, weight=1)
+        card = self._card(p, 0, title="DNS Provider")
+        ctk.CTkLabel(card, text="Sets DNS on all active network adapters and flushes the cache.",
+            font=ctk.CTkFont(family=FONT, size=11), text_color=TEXT2
+        ).grid(row=1, column=0, padx=14, pady=(0,8), sticky="w")
 
-    # ─── RESTORE ──────────────────────────────────────────────────────────────
-    def _t_restore(s,p):
-        s._hdr(p,"Restore Point","Manually create a Windows restore point.")
-        cd=s._crd(p,1)
-        ctk.CTkLabel(cd,text="Create Restore Point",font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=TXT).grid(row=0,column=0,padx=12,pady=(10,0),sticky="w")
-        ctk.CTkLabel(cd,text="Bypasses the 24-hour limit. Does not affect personal files.",font=ctk.CTkFont(family=FONT,size=11),text_color=TXT2).grid(row=1,column=0,padx=12,pady=(2,6),sticky="w")
-        ef=ctk.CTkFrame(cd,fg_color="transparent"); ef.grid(row=2,column=0,padx=12,pady=(0,4),sticky="w")
-        ctk.CTkLabel(ef,text="Label:",font=ctk.CTkFont(family=FONT,size=11),text_color=TXT2).grid(row=0,column=0,padx=(0,6))
-        s._rpe=ctk.CTkEntry(ef,width=280,font=ctk.CTkFont(family=FONT,size=12),fg_color=BG,border_color=BORD,text_color=TXT,placeholder_text="WinForge Manual Restore Point")
-        s._rpe.grid(row=0,column=1)
-        ctk.CTkButton(cd,text="Create Now",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=OK,hover_color=s._dk(OK),text_color="#fff",corner_radius=7,height=32,width=120,command=lambda: s._op(lambda cb: create_restore_point(s._rpe.get().strip() or "WinForge Manual",cb))).grid(row=3,column=0,padx=12,pady=10,sticky="w")
+        dns_info = {
+            "Cloudflare":             ("1.1.1.1 / 1.0.0.1",           "Fastest public DNS. Privacy-focused. No filtering."),
+            "Google":                 ("8.8.8.8 / 8.8.4.4",           "Reliable, fast. Google-owned."),
+            "Quad9 (Malware Block)":  ("9.9.9.9 / 149.112.112.112",   "Blocks known malware/phishing domains."),
+            "OpenDNS":                ("208.67.222.222 / 208.67.220.220","Cisco-owned. Optional content filtering."),
+            "AdGuard":                ("94.140.14.14 / 94.140.15.15",  "Blocks ads and trackers at DNS level."),
+            "Cloudflare Family":      ("1.1.1.3 / 1.0.0.3",           "Cloudflare with adult content filtering."),
+            "Automatic (DHCP)":       ("Reset to automatic",           "Let your router assign DNS (default)."),
+        }
+        for i, (provider, (ips, desc)) in enumerate(dns_info.items()):
+            row = i + 2
+            f = ctk.CTkFrame(card, fg_color=CARD2, corner_radius=6)
+            f.grid(row=row, column=0, sticky="ew", padx=10, pady=3)
+            f.grid_columnconfigure(1, weight=1)
+            ctk.CTkButton(f, text="Apply", width=70, height=28,
+                fg_color=ACCENT, hover_color=self._dk(ACCENT), text_color="#fff",
+                font=ctk.CTkFont(family=FONT, size=11), corner_radius=5,
+                command=lambda prov=provider: self._run(set_dns, prov, self._log_line)
+            ).grid(row=0, column=0, padx=(8,10), pady=8)
+            ctk.CTkLabel(f, text=provider,
+                font=ctk.CTkFont(family=FONT, size=12, weight="bold"), text_color=TEXT
+            ).grid(row=0, column=1, sticky="w")
+            ctk.CTkLabel(f, text=ips,
+                font=ctk.CTkFont(family=MONO, size=10), text_color=ACCENT
+            ).grid(row=0, column=2, padx=10)
+            ctk.CTkLabel(f, text=desc,
+                font=ctk.CTkFont(family=FONT, size=10), text_color=TEXT2
+            ).grid(row=0, column=3, padx=(0,10))
+
+    # ─────────────────────────────────────────────────────────────
+    # TAB: Windows Updates
+    # ─────────────────────────────────────────────────────────────
+    def _tab_updates(self, p):
+        p.grid_columnconfigure(0, weight=1)
+        items = [
+            ("Default (Automatic)",   "Restores Windows Update to Microsoft defaults — automatic updates enabled.",
+             set_updates_default,  SUCCESS),
+            ("Security Only",         "Receive security patches but defer feature updates by 365 days.",
+             set_updates_security_only, ACCENT),
+            ("Disable Updates",       "Disables Windows Update entirely. Not recommended for long-term use.",
+             set_updates_disable,  WARN),
+        ]
+        for i, (title, desc, fn, color) in enumerate(items):
+            card = self._card(p, i, title=title)
+            self._lbl(card, desc, 1)
+            self._btn(card, "Apply", lambda f=fn: self._run(f, self._log_line), color=color, row=2)
+
+    # ─────────────────────────────────────────────────────────────
+    # TAB: Registry Health
+    # ─────────────────────────────────────────────────────────────
+    def _tab_registry(self, p):
+        p.grid_columnconfigure(0, weight=1)
+
+        scan_card = self._card(p, 0, title="🔍 Scan Broken Uninstall Entries")
+        self._lbl(scan_card, "Finds registry entries pointing to .exe files that no longer exist.\nSafe to clean — these are just orphaned leftovers from uninstalled software.", 1)
+        self._btn(scan_card, "Scan", lambda: self._run(scan_broken_uninstall, self._log_line), color=ACCENT, row=2)
+
+        clean_card = self._card(p, 1, title="🧹 Clean Broken Entries")
+        self._lbl(clean_card, "Always backs up to a .reg file on your Desktop before removing anything.\nRun the scan first to see what will be removed.", 1)
+        self._btn(clean_card, "Clean", lambda: self._run(clean_broken_uninstall, self._log_line), color=WARN, row=2)
+
+    # ─────────────────────────────────────────────────────────────
+    # TAB: System Tools
+    # ─────────────────────────────────────────────────────────────
+    def _tab_systools(self, p):
+        p.grid_columnconfigure((0,1,2), weight=1)
+        tools = [
+            ("Device Manager",    "devmgmt.msc",   0,0),
+            ("Disk Management",   "diskmgmt.msc",  0,1),
+            ("Task Manager",      "taskmgr",       0,2),
+            ("Services",          "services.msc",  1,0),
+            ("Event Viewer",      "eventvwr.msc",  1,1),
+            ("Registry Editor",   "regedit",       1,2),
+            ("System Properties", "sysdm.cpl",     2,0),
+            ("Network Adapter",   "ncpa.cpl",      2,1),
+            ("Firewall",          "wf.msc",        2,2),
+            ("Group Policy",      "gpedit.msc",    3,0),
+            ("DirectX Diag",      "dxdiag",        3,1),
+            ("Control Panel",     "control",       3,2),
+            ("Programs & Features","appwiz.cpl",   4,0),
+            ("Startup Apps",      "shell:startup", 4,1),
+            ("Environment Vars",  "rundll32 sysdm.cpl,EditEnvironmentVariables", 4,2),
+        ]
+        for name, cmd, row, col in tools:
+            card = self._card(p, row, col=col, title=name)
+            self._btn(card, "Open",
+                lambda c=cmd: self._run(lambda cc=c: run_ps(f'Start-Process "{cc}"')),
+                color=CARD2, row=1)
+
+    # ─────────────────────────────────────────────────────────────
+    # TAB: Restore Points
+    # ─────────────────────────────────────────────────────────────
+    def _tab_restore(self, p):
+        p.grid_columnconfigure(0, weight=1)
+        card = self._card(p, 0, title="💾 Create System Restore Point")
+        self._lbl(card, "Creates a Windows System Restore Point immediately.\nDoes not affect personal files — only system settings and registry.\nWinForge bypasses the Windows 24-hour limit so you can create multiple in one session.", 1)
+
+        lf = ctk.CTkFrame(card, fg_color="transparent")
+        lf.grid(row=2, column=0, padx=14, pady=(10,4), sticky="w")
+        ctk.CTkLabel(lf, text="Description:",
+            font=ctk.CTkFont(family=FONT, size=12), text_color=TEXT2
+        ).grid(row=0, column=0, padx=(0,8))
+        self._rp_entry = ctk.CTkEntry(lf, width=320,
+            font=ctk.CTkFont(family=FONT, size=12),
+            fg_color=BG, border_color=BORDER, text_color=TEXT,
+            placeholder_text="WinForge Manual Restore Point")
+        self._rp_entry.grid(row=0, column=1)
+        self._btn(card, "Create Now",
+            lambda: self._run(create_restore_point, self._rp_entry.get().strip() or "WinForge Manual Restore Point", self._log_line),
+            color=SUCCESS, row=3)
+
+
+def main():
+    app = WinForge()
+    app.mainloop()
+
+if __name__ == "__main__":
+    main()

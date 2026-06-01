@@ -1,679 +1,820 @@
-import subprocess, re, os
-from datetime import datetime
+"""
+WinForge core operations — all PowerShell-backed backend logic.
+"""
+import subprocess, threading, json, os, sys
 
-_restore_created_this_session = False
-
-def run_ps(command, cb=None):
+def run_ps(script: str, cb=None) -> str:
+    """Run a PowerShell script and stream output via cb(line). Returns full output."""
     try:
-        p = subprocess.Popen(["powershell","-NoProfile","-ExecutionPolicy","Bypass","-Command",command],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        lines = []
-        for line in p.stdout:
+        proc = subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        )
+        out = []
+        for line in proc.stdout:
             line = line.rstrip()
-            if line and not _junk(line):
-                lines.append(line)
+            if line:
+                out.append(line)
                 if cb: cb(line)
-        p.wait()
-        return p.returncode == 0, "\n".join(lines)
-    except Exception as e: return False, str(e)
+        proc.wait()
+        return "\n".join(out)
+    except Exception as e:
+        msg = f"[ERROR] PowerShell error: {e}"
+        if cb: cb(msg)
+        return msg
 
-def run_cmd(command, cb=None):
-    try:
-        p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        lines = []
-        for line in p.stdout:
-            line = line.rstrip()
-            if line and not _junk(line):
-                lines.append(line)
-                if cb: cb(line)
-        p.wait()
-        return p.returncode == 0, "\n".join(lines)
-    except Exception as e: return False, str(e)
 
-def _junk(line):
-    s = line.strip()
-    if not s: return True
-    if re.match(r'^(\[\d{2}:\d{2}:\d{2}\]\s*){2,}$', s): return True
-    if re.match(r'^(\[\d{2}:\d{2}:\d{2}\]\s*)+$', s): return True
-    return False
-
-# ═══ RESTORE POINT ════════════════════════════════════════════════════════════
-
-def was_restore_created_this_session():
-    return _restore_created_this_session
-
-def create_restore_point(desc="WinForge Pre-Operation", cb=None):
-    global _restore_created_this_session
-    if cb: cb("[INFO] Creating system restore point...")
-    cmd = f'''
-    Enable-ComputerRestore -Drive "C:\\" -EA SilentlyContinue
-    Set-ItemProperty "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore" -Name "SystemRestorePointCreationFrequency" -Value 0 -Type DWord -Force -EA SilentlyContinue
-    $before = (Get-ComputerRestorePoint -EA SilentlyContinue | Measure-Object).Count
-    try {{ Checkpoint-Computer -Description "{desc}" -RestorePointType "MODIFY_SETTINGS" -EA Stop }}
-    catch {{ Write-Host "[ERROR] $($_.Exception.Message)"; exit 1 }}
-    $after = (Get-ComputerRestorePoint -EA SilentlyContinue | Measure-Object).Count
-    if ($after -gt $before) {{
-        $rp = Get-ComputerRestorePoint | Sort-Object SequenceNumber -Descending | Select-Object -First 1
-        Write-Host "Restore point created: $($rp.Description) (ID $($rp.SequenceNumber))"
-    }} else {{ Write-Host "[WARN] Command ran but no new restore point detected." }}
-    '''
-    s, o = run_ps(cmd, cb)
-    if s: _restore_created_this_session = True
-    elif cb: cb("[WARN] Restore point may have failed. Check System Protection is ON for C:")
-    return s
-
-# ═══ SYSTEM REPAIR ════════════════════════════════════════════════════════════
-
-def run_dism(cb=None):
-    if cb: cb("[INFO] Running DISM RestoreHealth (5-15 min)...")
-    return run_cmd("DISM /Online /Cleanup-Image /RestoreHealth", cb)
-
-def run_sfc(cb=None):
-    if cb: cb("[INFO] Running System File Checker...")
-    s, o = run_cmd("sfc /scannow", cb)
-    if cb: cb("[OK] SFC complete.")
-    return s, o
-
-def run_chkdsk(cb=None):
-    if cb: cb("[INFO] Scheduling CHKDSK on next boot...")
-    return run_cmd("echo Y | chkdsk C: /f /r /x", cb)
-
-def run_full_repair(cb=None):
-    if cb: cb("[INFO] Starting Full System Repair...")
-    create_restore_point("WinForge Full Repair", cb)
-    run_dism(cb)
-    run_sfc(cb)
-    if cb: cb("[OK] Full repair complete. Restart recommended.")
-    return True, "Done"
-
-# ═══ CLEANUP ══════════════════════════════════════════════════════════════════
-
-CLEANUP_ITEMS = {
-    "temp": ("Temp Files", "Deletes %TEMP% and C:\\Windows\\Temp contents.", False),
-    "wucache": ("Update Cache", "Clears Windows Update download cache.", False),
-    "prefetch": ("Prefetch", "Clears prefetch cache. Rebuilds automatically.", False),
-    "diskclean": ("Disk Cleanup", "Runs built-in Disk Cleanup with all categories.", False),
-    "dns": ("Flush DNS", "Clears the DNS resolver cache.", False),
-    "network": ("Network Reset", "Resets Winsock, TCP/IP, DNS. Needs restart.", True),
-}
-def clean_temp(cb=None):
-    if cb: cb("[INFO] Cleaning temp files...")
-    return run_ps(r'Remove-Item "$env:TEMP\*" -Recurse -Force -EA SilentlyContinue; Remove-Item "C:\Windows\Temp\*" -Recurse -Force -EA SilentlyContinue; Write-Host "Temp files cleaned."', cb)
-def clean_wucache(cb=None):
-    if cb: cb("[INFO] Clearing update cache...")
-    return run_ps(r'Stop-Service wuauserv,bits -Force -EA SilentlyContinue; Remove-Item "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -EA SilentlyContinue; Start-Service wuauserv,bits -EA SilentlyContinue; Write-Host "Update cache cleared."', cb)
-def clean_prefetch(cb=None):
-    if cb: cb("[INFO] Clearing prefetch...")
-    return run_ps(r"Remove-Item 'C:\Windows\Prefetch\*' -Force -EA SilentlyContinue; Write-Host 'Prefetch cleared.'", cb)
-def clean_diskclean(cb=None):
-    if cb: cb("[INFO] Running Disk Cleanup...")
-    return run_ps(r'$k=Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"; foreach($i in $k){Set-ItemProperty $i.PSPath -Name StateFlags0064 -Value 2 -EA SilentlyContinue}; Start-Process cleanmgr -ArgumentList "/sagerun:64" -Wait; Write-Host "Disk Cleanup complete."', cb)
-def clean_dns(cb=None):
-    if cb: cb("[INFO] Flushing DNS...")
-    return run_cmd("ipconfig /flushdns", cb)
-def clean_network(cb=None):
-    if cb: cb("[INFO] Resetting network stack...")
-    for c in ["netsh winsock reset","netsh int ip reset","ipconfig /flushdns","ipconfig /release","ipconfig /renew"]:
-        run_cmd(c, cb)
-    if cb: cb("[OK] Network reset complete. Restart needed.")
-    return True, "Done"
-CLEANUP_FNS = {"temp":clean_temp,"wucache":clean_wucache,"prefetch":clean_prefetch,"diskclean":clean_diskclean,"dns":clean_dns,"network":clean_network}
-
-# ═══ DEPENDENCIES ═════════════════════════════════════════════════════════════
-
-DEP_ITEMS = [
-    (".NET 6","Microsoft.DotNet.Runtime.6"),(".NET 7","Microsoft.DotNet.Runtime.7"),
-    (".NET 8 (LTS)","Microsoft.DotNet.Runtime.8"),(".NET 9","Microsoft.DotNet.Runtime.9"),
-    ("VC++ 2015-2022 x64","Microsoft.VCRedist.2015+.x64"),("VC++ 2015-2022 x86","Microsoft.VCRedist.2015+.x86"),
-    ("DirectX","Microsoft.DirectX"),("WebView2","Microsoft.EdgeWebView2Runtime"),
-]
-def install_winget_pkg(pkg, cb=None):
-    if cb: cb(f"[INFO] Installing {pkg}...")
-    return run_cmd(f'winget install --id {pkg} --silent --accept-package-agreements --accept-source-agreements', cb)
-
-# ═══ APP INSTALL ══════════════════════════════════════════════════════════════
-
-APP_LIST = {
-    "Brave Browser":{"winget":"Brave.Brave","choco":"brave","cat":"Browsers"},
-    "Firefox":{"winget":"Mozilla.Firefox","choco":"firefox","cat":"Browsers"},
-    "Google Chrome":{"winget":"Google.Chrome","choco":"googlechrome","cat":"Browsers"},
-    "Zen Browser":{"winget":"Zen-Team.Zen-Browser","choco":None,"cat":"Browsers"},
-    "Discord":{"winget":"Discord.Discord","choco":"discord","cat":"Communication"},
-    "Telegram":{"winget":"Telegram.TelegramDesktop","choco":"telegram","cat":"Communication"},
-    "Zoom":{"winget":"Zoom.Zoom","choco":"zoom","cat":"Communication"},
-    "Spotify":{"winget":"Spotify.Spotify","choco":"spotify","cat":"Media"},
-    "VLC":{"winget":"VideoLAN.VLC","choco":"vlc","cat":"Media"},
-    "OBS Studio":{"winget":"OBSProject.OBSStudio","choco":"obs-studio","cat":"Media"},
-    "Steam":{"winget":"Valve.Steam","choco":"steam","cat":"Gaming"},
-    "Epic Games":{"winget":"EpicGames.EpicGamesLauncher","choco":"epicgameslauncher","cat":"Gaming"},
-    "GOG Galaxy":{"winget":"GOG.Galaxy","choco":"goggalaxy","cat":"Gaming"},
-    "Obsidian":{"winget":"Obsidian.Obsidian","choco":"obsidian","cat":"Productivity"},
-    "Notion":{"winget":"Notion.Notion","choco":"notion","cat":"Productivity"},
-    "VS Code":{"winget":"Microsoft.VisualStudioCode","choco":"vscode","cat":"Development"},
-    "Git":{"winget":"Git.Git","choco":"git","cat":"Development"},
-    "Python":{"winget":"Python.Python.3.12","choco":"python","cat":"Development"},
-    "Node.js LTS":{"winget":"OpenJS.NodeJS.LTS","choco":"nodejs-lts","cat":"Development"},
-    "Notepad++":{"winget":"Notepad++.Notepad++","choco":"notepadplusplus","cat":"Development"},
-    "7-Zip":{"winget":"7zip.7zip","choco":"7zip","cat":"Utilities"},
-    "WinRAR":{"winget":"RARLab.WinRAR","choco":"winrar","cat":"Utilities"},
-    "PowerToys":{"winget":"Microsoft.PowerToys","choco":"powertoys","cat":"Utilities"},
-    "qBittorrent":{"winget":"qBittorrent.qBittorrent","choco":"qbittorrent","cat":"Utilities"},
-    "Everything Search":{"winget":"voidtools.Everything","choco":"everything","cat":"Utilities"},
-    "ShareX":{"winget":"ShareX.ShareX","choco":"sharex","cat":"Utilities"},
-    "Bitwarden":{"winget":"Bitwarden.Bitwarden","choco":"bitwarden","cat":"Utilities"},
-    "TreeSize Free":{"winget":"JAMSoftware.TreeSize.Free","choco":"treesizefree","cat":"Utilities"},
-}
-def check_winget(cb=None): return run_cmd("winget --version", cb)[0]
-def check_choco(cb=None): return run_cmd("choco --version", cb)[0]
-def install_winget_itself(cb=None):
-    if cb: cb("[INFO] Installing/repairing winget...")
-    return run_ps(r'Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -EA SilentlyContinue; Write-Host "Winget install attempted."', cb)
-def install_choco_itself(cb=None):
-    if cb: cb("[INFO] Installing Chocolatey...")
-    return run_ps(r"Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))", cb)
-def install_app(name, method="winget", cb=None):
-    info = APP_LIST.get(name)
-    if not info: return False, "Unknown"
-    pkg = info.get(method)
-    if not pkg:
-        if cb: cb(f"[WARN] {name} not available via {method}")
-        return False, "N/A"
-    if method == "winget":
-        return run_cmd(f'winget install --id {pkg} --silent --accept-package-agreements --accept-source-agreements', cb)
-    else:
-        return run_cmd(f'choco install {pkg} -y', cb)
-
-# ═══ DNS ══════════════════════════════════════════════════════════════════════
-
-DNS_SERVERS = {
-    "Cloudflare (1.1.1.1)":("1.1.1.1","1.0.0.1"),
-    "Google (8.8.8.8)":("8.8.8.8","8.8.4.4"),
-    "Quad9 (9.9.9.9)":("9.9.9.9","149.112.112.112"),
-    "OpenDNS (208.67.222.222)":("208.67.222.222","208.67.220.220"),
-    "AdGuard (94.140.14.14)":("94.140.14.14","94.140.15.15"),
-    "Cloudflare Family (1.1.1.3)":("1.1.1.3","1.0.0.3"),
-    "Automatic (DHCP)":(None,None),
-}
-def set_dns(dns_name, cb=None):
-    pri, sec = DNS_SERVERS.get(dns_name, (None,None))
-    if pri is None:
-        if cb: cb("[INFO] Setting DNS to automatic (DHCP)...")
-        cmd = r'Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | foreach { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }; Write-Host "DNS set to DHCP."'
-    else:
-        if cb: cb(f"[INFO] Setting DNS to {dns_name}...")
-        cmd = f'Get-NetAdapter | Where-Object {{$_.Status -eq "Up"}} | foreach {{ Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ("{pri}","{sec}") }}; Write-Host "DNS set to {dns_name}"'
-    run_ps(cmd, cb); run_cmd("ipconfig /flushdns", cb)
-    return True
-
-# ═══ UPDATES ══════════════════════════════════════════════════════════════════
-
-def updates_default(cb=None):
-    if cb: cb("[INFO] Resetting Windows Update to defaults...")
-    return run_ps(r'Remove-Item "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Recurse -Force -EA SilentlyContinue; Set-Service wuauserv -StartupType Automatic -EA SilentlyContinue; Start-Service wuauserv -EA SilentlyContinue; Write-Host "Windows Update reset."', cb)
-def updates_security(cb=None):
-    if cb: cb("[INFO] Configuring security-only updates...")
-    return run_ps(r'''$p="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"; $p2="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; If(!(Test-Path $p2)){New-Item $p2 -Force|Out-Null}; Set-ItemProperty $p -Name NoAutoUpdate -Value 0 -Force; Set-ItemProperty $p -Name AUOptions -Value 3 -Force; Set-ItemProperty $p2 -Name DeferFeatureUpdates -Value 1 -Force; Set-ItemProperty $p2 -Name DeferFeatureUpdatesPeriodInDays -Value 365 -Force; Set-ItemProperty $p2 -Name DeferQualityUpdates -Value 1 -Force; Set-ItemProperty $p2 -Name DeferQualityUpdatesPeriodInDays -Value 4 -Force; Set-ItemProperty $p2 -Name ExcludeWUDriversInQualityUpdate -Value 1 -Force; Write-Host "Security-only updates configured."''', cb)
-def updates_disable(cb=None):
-    if cb: cb("[WARN] Disabling ALL Windows Updates...")
-    return run_ps(r'''$p="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"; $p2="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; If(!(Test-Path $p2)){New-Item $p2 -Force|Out-Null}; Set-ItemProperty $p -Name NoAutoUpdate -Value 1 -Force; Set-ItemProperty $p -Name AUOptions -Value 1 -Force; Set-ItemProperty $p2 -Name DisableWindowsUpdateAccess -Value 1 -Force; Stop-Service wuauserv -Force -EA SilentlyContinue; Set-Service wuauserv -StartupType Disabled -EA SilentlyContinue; Write-Host "All updates disabled."''', cb)
-
-# ═══ SYSTEM TOOLS ═════════════════════════════════════════════════════════════
-
-PANELS = [("Computer Management","compmgmt.msc"),("Control Panel","control"),("Network Connections","ncpa.cpl"),
-    ("Power Panel","powercfg.cpl"),("Printer Panel","printui /s"),("Region","intl.cpl"),
-    ("Sound Settings","mmsys.cpl"),("System Properties","sysdm.cpl"),("Time and Date","timedate.cpl"),("Windows Restore","rstrui.exe")]
-def open_panel(cmd, cb=None):
-    subprocess.Popen(cmd, shell=True)
-    return True, "Done"
-
-# ═══ DEBLOAT ══════════════════════════════════════════════════════════════════
-
-BLOATWARE = {
-    "Microsoft.3DBuilder":("3D Builder",False,"Old 3D printing app."),
-    "Microsoft.BingWeather":("Bing Weather",False,"Weather widget app."),
-    "Microsoft.BingNews":("Microsoft News",False,"News feed app."),
-    "Microsoft.GetHelp":("Get Help",False,"Microsoft support app."),
-    "Microsoft.Getstarted":("Tips",False,"Windows tips app."),
-    "Microsoft.MicrosoftOfficeHub":("Office Hub",False,"Office promo hub."),
-    "Microsoft.MicrosoftSolitaireCollection":("Solitaire",False,"Card games with ads."),
-    "Microsoft.MixedReality.Portal":("Mixed Reality Portal",False,"VR/AR portal."),
-    "Microsoft.Movies.TV":("Movies & TV",False,"Video player."),
-    "Microsoft.MSPaint":("Paint 3D",False,"3D Paint, not classic."),
-    "Microsoft.People":("People",False,"Contacts app."),
-    "Microsoft.SkypeApp":("Skype",False,"Skype consumer."),
-    "Microsoft.Todos":("Microsoft To Do",False,"Task manager."),
-    "Microsoft.WindowsAlarms":("Alarms & Clock",False,"Alarm app."),
-    "Microsoft.WindowsFeedbackHub":("Feedback Hub",False,"Feedback to MS."),
-    "Microsoft.WindowsMaps":("Maps",False,"Microsoft Maps."),
-    "Microsoft.WindowsSoundRecorder":("Sound Recorder",False,"Audio recorder."),
-    "Microsoft.YourPhone":("Phone Link",False,"Phone companion."),
-    "Microsoft.ZuneMusic":("Groove Music",False,"Old music player."),
-    "Microsoft.ZuneVideo":("Groove Video",False,"Old video app."),
-    "MicrosoftTeams":("Teams (Personal)",False,"Personal Teams."),
-    "Microsoft.PowerAutomateDesktop":("Power Automate",False,"Automation tool."),
-    "Microsoft.Whiteboard":("Whiteboard",False,"Digital whiteboard."),
-    "Clipchamp.Clipchamp":("Clipchamp",False,"Video editor."),
-    "Microsoft.WindowsCommunicationsApps":("Mail & Calendar",False,"Mail/Calendar."),
-    "Microsoft.XboxSpeechToTextOverlay":("Xbox Speech",False,"Xbox speech overlay."),
-    "Microsoft.GamingApp":("Xbox App",True,"May break Game Pass."),
-    "Microsoft.XboxGameOverlay":("Xbox Game Overlay",True,"Part of Xbox services."),
-    "Microsoft.XboxGamingOverlay":("Xbox Gaming Overlay",True,"Affects Game Bar."),
-    "Microsoft.XboxIdentityProvider":("Xbox Identity",True,"Required for Xbox login."),
-    "Microsoft.OneDrive":("OneDrive",True,"Backup data first."),
-    "Microsoft.Cortana":("Cortana",True,"May affect search."),
-}
-
-def check_app_installed(pkg, cb=None):
-    """Check if an app is actually installed before trying to remove it."""
-    s, o = run_ps(f'$a = Get-AppxPackage -Name "{pkg}" -EA SilentlyContinue; if ($a) {{ Write-Host "INSTALLED" }} else {{ Write-Host "NOT_INSTALLED" }}', None)
-    return "INSTALLED" in o
-
-def remove_app(pkg, cb=None):
-    name = BLOATWARE.get(pkg, (pkg,False,""))[0]
-    if not check_app_installed(pkg):
-        if cb: cb(f"[INFO] {name} is not installed. Skipping.")
-        return True, "Not installed"
-    if cb: cb(f"[INFO] Removing {name}...")
-    s, o = run_ps(f'Get-AppxPackage -Name "{pkg}" -AllUsers | Remove-AppxPackage -AllUsers -EA SilentlyContinue; Get-AppxProvisionedPackage -Online | Where-Object DisplayName -like "{pkg}" | Remove-AppxProvisionedPackage -Online -EA SilentlyContinue; Write-Host "Removed: {name}"', cb)
-    # Verify removal
-    if not check_app_installed(pkg):
-        if cb: cb(f"[OK] {name} removed successfully.")
-        return True, "Removed"
-    else:
-        if cb: cb(f"[WARN] {name} may not have been fully removed.")
-        return False, "Partial"
-
-# ═══ BROWSER DEBLOAT (WinUtil exact) ═════════════════════════════════════════
-
-def debloat_edge(cb=None):
-    if cb: cb("[INFO] Debloating Microsoft Edge (WinUtil method)...")
-    cmd = r'''
-    $p="HKLM:\SOFTWARE\Policies\Microsoft\Edge"; $pu="HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate"; $pb="HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallBlocklist"
-    If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; If(!(Test-Path $pu)){New-Item $pu -Force|Out-Null}; If(!(Test-Path $pb)){New-Item $pb -Force|Out-Null}
-    Set-ItemProperty $pu -Name CreateDesktopShortcutDefault -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name PersonalizationReportingEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $pb -Name "1" -Value "ofefcgjbeghpigppfmkologfjadafddi" -Type String -Force
-    Set-ItemProperty $p -Name ShowRecommendationsEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name HideFirstRunExperience -Value 1 -Type DWord -Force
-    Set-ItemProperty $p -Name UserFeedbackAllowed -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name ConfigureDoNotTrack -Value 1 -Type DWord -Force
-    Set-ItemProperty $p -Name AlternateErrorPagesEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name EdgeCollectionsEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name EdgeShoppingAssistantEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name MicrosoftEdgeInsiderPromotionEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name ShowMicrosoftRewards -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name WebWidgetAllowed -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name DiagnosticData -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name EdgeAssetDeliveryServiceEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name WalletDonationEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name DefaultBrowserSettingsCampaignEnabled -Value 0 -Type DWord -Force
-    Write-Host "Edge debloated (17 entries)."
-    '''
-    return run_ps(cmd, cb)
-
-def debloat_brave(cb=None):
-    if cb: cb("[INFO] Debloating Brave Browser (WinUtil method)...")
-    cmd = r'''
-    $p="HKLM:\SOFTWARE\Policies\BraveSoftware\Brave"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}
-    Set-ItemProperty $p -Name BraveRewardsDisabled -Value 1 -Type DWord -Force
-    Set-ItemProperty $p -Name BraveWalletDisabled -Value 1 -Type DWord -Force
-    Set-ItemProperty $p -Name BraveVPNDisabled -Value 1 -Type DWord -Force
-    Set-ItemProperty $p -Name BraveAIChatEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name BraveStatsPingEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name BraveNewsDisabled -Value 1 -Type DWord -Force
-    Set-ItemProperty $p -Name BraveTalkDisabled -Value 1 -Type DWord -Force
-    Set-ItemProperty $p -Name TorDisabled -Value 1 -Type DWord -Force
-    Set-ItemProperty $p -Name BraveP3AEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name UrlKeyedAnonymizedDataCollectionEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name SafeBrowsingExtendedReportingEnabled -Value 0 -Type DWord -Force
-    Set-ItemProperty $p -Name MetricsReportingEnabled -Value 0 -Type DWord -Force
-    Write-Host "Brave debloated (12 entries)."
-    '''
-    return run_ps(cmd, cb)
-
-# ═══ REGISTRY HEALTH ══════════════════════════════════════════════════════════
-
-def registry_scan_broken_uninstalls(cb=None):
-    if cb: cb("[INFO] Scanning for broken uninstall entries...")
-    cmd = r'''
-    $path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
-    $broken = @()
-    Get-ChildItem $path -EA SilentlyContinue | ForEach-Object {
-        $name = $_.GetValue("DisplayName")
-        $loc = $_.GetValue("InstallLocation")
-        if ($name -and $loc -and $loc -ne "" -and !(Test-Path $loc)) {
-            $broken += "$name|$loc|$($_.PSChildName)"
-        }
-    }
-    $path2 = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-    Get-ChildItem $path2 -EA SilentlyContinue | ForEach-Object {
-        $name = $_.GetValue("DisplayName")
-        $loc = $_.GetValue("InstallLocation")
-        if ($name -and $loc -and $loc -ne "" -and !(Test-Path $loc)) {
-            $broken += "$name|$loc|$($_.PSChildName)"
-        }
-    }
-    if ($broken.Count -eq 0) { Write-Host "NO_BROKEN_FOUND" }
-    else { foreach ($b in $broken) { Write-Host "BROKEN:$b" } }
-    '''
-    s, o = run_ps(cmd, cb)
-    results = []
-    for line in o.split("\n"):
-        if line.startswith("BROKEN:"):
-            parts = line[7:].split("|")
-            if len(parts) >= 3:
-                results.append({"name": parts[0], "path": parts[1], "key": parts[2]})
-    return results
-
-def registry_scan_empty_keys(cb=None):
-    if cb: cb("[INFO] Scanning for empty registry keys from uninstalled software...")
-    cmd = r'''
-    $paths = @(
-        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
-    )
-    $empty = @()
-    foreach ($p in $paths) {
-        Get-ChildItem $p -EA SilentlyContinue | ForEach-Object {
-            $vals = $_.GetValueNames() | Where-Object { $_ -ne "" }
-            $subs = $_.GetSubKeyNames()
-            if ($vals.Count -eq 0 -and $subs.Count -eq 0) {
-                $empty += "$p\$($_.PSChildName)"
-            }
-        }
-    }
-    if ($empty.Count -eq 0) { Write-Host "NO_EMPTY_FOUND" }
-    else { foreach ($e in $empty) { Write-Host "EMPTY:$e" } }
-    '''
-    s, o = run_ps(cmd, cb)
-    results = []
-    for line in o.split("\n"):
-        if line.startswith("EMPTY:"):
-            results.append(line[6:])
-    return results
-
-def registry_backup(cb=None):
-    if cb: cb("[INFO] Backing up registry before cleaning...")
-    backup_path = os.path.join(os.path.expanduser("~"), "Desktop", f"WinForge_RegBackup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.reg")
-    cmd = f'reg export HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall "{backup_path}" /y'
-    run_cmd(cmd, cb)
-    if cb: cb(f"[OK] Registry backup saved to Desktop.")
-    return backup_path
-
-def registry_clean_broken_uninstalls(keys_to_remove, cb=None):
-    if cb: cb("[INFO] Removing broken uninstall entries...")
-    for key in keys_to_remove:
-        for root in ["HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-                      "HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"]:
-            run_ps(f'Remove-Item "{root}\\{key}" -Recurse -Force -EA SilentlyContinue', None)
-    if cb: cb(f"[OK] Removed {len(keys_to_remove)} broken entries.")
-
-def registry_clean_empty_keys(paths_to_remove, cb=None):
-    if cb: cb("[INFO] Removing empty registry keys...")
-    for path in paths_to_remove:
-        run_ps(f'Remove-Item "{path}" -Recurse -Force -EA SilentlyContinue', None)
-    if cb: cb(f"[OK] Removed {len(paths_to_remove)} empty keys.")
-
-# ═══ TWEAKS (WinUtil aligned) ═════════════════════════════════════════════════
-
-TWEAKS = {
-    # ── ESSENTIAL (WinUtil) ──
-    "activity_history": {"label":"Activity History - Disable","cat":"essential","tip":"Erases recent docs, clipboard, and run history. Sets 3 registry keys matching WinUtil.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name EnableActivityFeed -Value 0 -Type DWord -Force -EA SilentlyContinue; Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name PublishUserActivities -Value 0 -Type DWord -Force -EA SilentlyContinue; Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name UploadUserActivities -Value 0 -Type DWord -Force -EA SilentlyContinue; Write-Host "Activity History disabled."', cb)},
-    "disable_bitlocker": {"label":"BitLocker - Disable","cat":"essential","tip":"Disables BitLocker drive encryption on C: drive.","danger":False,
-        "fn": lambda cb: run_ps(r'manage-bde -off C: -EA SilentlyContinue; Write-Host "BitLocker disable initiated on C:. May take time to decrypt."', cb)},
-    "consumer_features": {"label":"ConsumerFeatures - Disable","cat":"essential","tip":"Prevents Windows from silently installing suggested apps like Candy Crush. Some default apps become inaccessible.","danger":False,
-        "fn": lambda cb: run_ps(r'$p="HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; Set-ItemProperty $p -Name DisableWindowsConsumerFeatures -Value 1 -Type DWord -Force; Write-Host "ConsumerFeatures disabled."', cb)},
-    "end_task_rightclick": {"label":"End Task With Right Click - Enable","cat":"essential","tip":"Adds End Task to the taskbar right-click menu for killing frozen apps.","danger":False,
-        "fn": lambda cb: run_ps(r'$p="HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; Set-ItemProperty $p -Name TaskbarEndTask -Value 1 -Type DWord -Force; Write-Host "End Task on right-click enabled."', cb)},
-    "disable_folder_discovery": {"label":"File Explorer Folder Discovery - Disable","cat":"essential","tip":"Stops Explorer from auto-detecting folder types and applying templates. Speeds up folder loading.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\Bags\AllFolders\Shell" -Name FolderType -Value "NotSpecified" -Type String -Force -EA SilentlyContinue; Write-Host "Folder discovery disabled."', cb)},
-    "disable_hibernation": {"label":"Hibernation - Disable","cat":"essential","tip":"Disables hibernation and frees several GB of disk. Not recommended on laptops.","danger":False,
-        "fn": lambda cb: run_cmd("powercfg /h off", cb)},
-    "disable_location": {"label":"Location Tracking - Disable","cat":"essential","tip":"Disables Windows location services, sensors, and auto map updates. WinUtil sets 3 registry + 1 service.","danger":False,
-        "fn": lambda cb: run_ps(r'''Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location" -Name Value -Value "Deny" -Type String -Force -EA SilentlyContinue; Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Sensor\Overrides\{BFA794E4-F964-4FDB-90F6-51056BFE4B44}" -Name SensorPermissionState -Value 0 -Type DWord -Force -EA SilentlyContinue; Set-ItemProperty "HKLM:\SYSTEM\Maps" -Name AutoUpdateEnabled -Value 0 -Type DWord -Force -EA SilentlyContinue; Set-Service lfsvc -StartupType Disabled -EA SilentlyContinue; Write-Host "Location tracking disabled."''', cb)},
-    "disable_store_search": {"label":"Store Search Results - Disable","cat":"essential","tip":"Stops Start Menu from showing Microsoft Store app suggestions.","danger":False,
-        "fn": lambda cb: run_ps(r'$p="HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; Set-ItemProperty $p -Name NoUseStoreOpenWith -Value 1 -Type DWord -Force; Write-Host "Store suggestions disabled."', cb)},
-    "disable_ps7_telemetry": {"label":"PowerShell 7 Telemetry - Disable","cat":"essential","tip":"Sets environment variable to stop PowerShell 7 telemetry.","danger":False,
-        "fn": lambda cb: run_ps(r'[Environment]::SetEnvironmentVariable("POWERSHELL_TELEMETRY_OPTOUT","1","Machine"); Write-Host "PS7 telemetry disabled."', cb)},
-    "services_manual": {"label":"Services - Set to Manual","cat":"essential","tip":"Sets background services to Manual/Disabled matching WinUtil. Also adjusts SvcHostSplitThreshold based on RAM.","danger":False,
-        "fn": lambda cb: run_ps(r'''$svcManual=@("MapsBroker","StorSvc"); $svcDisabled=@("CscService","DiagTrack","SharedAccess"); foreach($s in $svcManual){Set-Service $s -StartupType Manual -EA SilentlyContinue}; foreach($s in $svcDisabled){Set-Service $s -StartupType Disabled -EA SilentlyContinue}; $ram=[math]::Round((Get-CimInstance Win32_PhysicalMemory|Measure-Object Capacity -Sum).Sum/1KB); Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control" -Name SvcHostSplitThresholdInKB -Value $ram -Type DWord -Force -EA SilentlyContinue; Write-Host "Services configured. SvcHost threshold set to $ram KB."''', cb)},
-    "start_menu_layout": {"label":"Start Menu Previous Layout - Enable","cat":"essential","tip":"Restores the previous Start Menu layout by enabling the 'More Pins' layout.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name Start_Layout -Value 1 -Type DWord -Force -EA SilentlyContinue; Write-Host "Start Menu layout set to More Pins."', cb)},
-    "disable_telemetry": {"label":"Telemetry - Disable","cat":"essential","tip":"Disables diagnostic data collection and DiagTrack service.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name AllowTelemetry -Value 0 -Type DWord -Force -EA SilentlyContinue; Stop-Service DiagTrack -Force -EA SilentlyContinue; Set-Service DiagTrack -StartupType Disabled -EA SilentlyContinue; Write-Host "Telemetry disabled."', cb)},
-    "remove_widgets": {"label":"Widgets - Remove","cat":"essential","tip":"Fully removes Widgets platform and WebExperience packages, matching WinUtil method.","danger":False,
-        "fn": lambda cb: run_ps(r'Get-Process *Widget* -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; Get-AppxPackage Microsoft.WidgetsPlatformRuntime -AllUsers -EA SilentlyContinue | Remove-AppxPackage -AllUsers -EA SilentlyContinue; Get-AppxPackage MicrosoftWindows.Client.WebExperience -AllUsers -EA SilentlyContinue | Remove-AppxPackage -AllUsers -EA SilentlyContinue; Stop-Process -Name explorer -Force -EA SilentlyContinue; Write-Host "Widgets removed."', cb)},
-    "disable_wpbt": {"label":"WPBT - Disable","cat":"essential","tip":"Disables Windows Platform Binary Table. Prevents OEM firmware from executing code on boot.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name DisableWpbtExecution -Value 1 -Type DWord -Force -EA SilentlyContinue; Write-Host "WPBT disabled."', cb)},
-
-    # ── ADVANCED / CAUTION (WinUtil) ──
-    "adobe_block": {"label":"Adobe URL Block List - Enable","cat":"advanced","tip":"Blocks Adobe activation/telemetry servers via hosts file. May prevent Adobe license checks.","danger":True,
-        "fn": lambda cb: run_ps(r'''$hosts="$env:WINDIR\System32\drivers\etc\hosts"; $urls=@("lmlicenses.wip4.adobe.com","lm.licenses.adobe.com","na1r.services.adobe.com","hlrcv.stage.adobe.com","practivate.adobe.com","activate.adobe.com"); foreach($u in $urls){$line="0.0.0.0 $u"; if(!(Select-String -Path $hosts -Pattern $u -Quiet -EA SilentlyContinue)){Add-Content $hosts $line}}; Write-Host "Adobe URLs blocked in hosts file."''', cb)},
-    "disable_bg_apps": {"label":"Background Apps - Disable","cat":"advanced","tip":"Stops all apps from running in background. Saves RAM and battery.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name GlobalUserDisabled -Value 1 -Type DWord -Force -EA SilentlyContinue; Write-Host "Background apps disabled."', cb)},
-    "utc_time": {"label":"Date & Time - Set to UTC","cat":"advanced","tip":"Sets hardware clock to UTC. Useful for dual-boot with Linux.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation" -Name RealTimeIsUniversal -Value 1 -Type DWord -Force; Write-Host "Hardware clock set to UTC."', cb)},
-    "disable_home_gallery": {"label":"File Explorer Home and Gallery - Disable","cat":"advanced","tip":"Removes the Home and Gallery tabs from Win11 File Explorer navigation.","danger":False,
-        "fn": lambda cb: run_ps(r'''$p="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer"; Set-ItemProperty $p -Name HubMode -Value 1 -Type DWord -Force -EA SilentlyContinue; $gp="HKCU:\Software\Classes\CLSID\{e88865ea-0e1c-4e20-9aa6-edcd0212c87c}"; If(!(Test-Path $gp)){New-Item $gp -Force|Out-Null}; Set-ItemProperty $gp -Name "System.IsPinnedToNameSpaceTree" -Value 0 -Type DWord -Force; Write-Host "Home and Gallery disabled."''', cb)},
-    "disable_fullscreen_opt": {"label":"Fullscreen Optimizations - Disable","cat":"advanced","tip":"Can improve gaming performance and reduce input lag.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\System\GameConfigStore" -Name GameDVR_DXGIHonorFSEWindowsCompatible -Value 1 -Type DWord -Force -EA SilentlyContinue; Set-ItemProperty "HKCU:\System\GameConfigStore" -Name GameDVR_FSEBehavior -Value 2 -Type DWord -Force -EA SilentlyContinue; Write-Host "Fullscreen optimizations disabled."', cb)},
-    "disable_ipv6": {"label":"IPv6 - Disable","cat":"advanced","tip":"Fully disables IPv6 on all adapters. Only if your network doesn't use it.","danger":True,
-        "fn": lambda cb: run_ps(r'Get-NetAdapter | foreach { Disable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -EA SilentlyContinue }; Write-Host "IPv6 disabled."', cb)},
-    "prefer_ipv4": {"label":"IPv6 - Prefer IPv4","cat":"advanced","tip":"Keeps IPv6 but prefers IPv4. Safer than full disable.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name DisabledComponents -Value 32 -Type DWord -Force -EA SilentlyContinue; Write-Host "IPv4 preferred."', cb)},
-    "remove_edge": {"label":"Microsoft Edge - Remove","cat":"advanced","tip":"Fully removes Microsoft Edge from the system. Some Windows features may break.","danger":True,
-        "fn": lambda cb: run_ps(r'''$edgePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application"; if (Test-Path $edgePath) { $setup = Get-ChildItem $edgePath -Recurse -Filter "setup.exe" | Select-Object -First 1; if ($setup) { Start-Process $setup.FullName -ArgumentList "--uninstall --system-level --force-uninstall" -Wait } }; Write-Host "Edge removal attempted."''', cb)},
-    "remove_onedrive": {"label":"OneDrive - Remove","cat":"advanced","tip":"Fully uninstalls OneDrive. Backup data first.","danger":True,
-        "fn": lambda cb: run_ps(r'Stop-Process -Name OneDrive -Force -EA SilentlyContinue; Start-Process "$env:SYSTEMROOT\SysWOW64\OneDriveSetup.exe" -ArgumentList "/uninstall" -Wait -EA SilentlyContinue; Start-Process "$env:SYSTEMROOT\System32\OneDriveSetup.exe" -ArgumentList "/uninstall" -Wait -EA SilentlyContinue; Write-Host "OneDrive removed."', cb)},
-    "disable_razer_auto": {"label":"Razer Auto-Install - Disable","cat":"advanced","tip":"Stops Razer Synapse from auto-installing when you plug in a Razer device.","danger":False,
-        "fn": lambda cb: run_ps(r'$p="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Installer"; Set-ItemProperty $p -Name DisableCoInstallers -Value 1 -Type DWord -Force -EA SilentlyContinue; Write-Host "Razer auto-install disabled."', cb)},
-    "disable_rdp_warnings": {"label":"RDP Unsigned File Warnings - Disable","cat":"advanced","tip":"Stops the warning popup when opening unsigned RDP files.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Software\Microsoft\Terminal Server Client" -Name AuthenticationLevelOverride -Value 0 -Type DWord -Force -EA SilentlyContinue; Write-Host "RDP warnings disabled."', cb)},
-    "remove_copilot": {"label":"Remove Copilot","cat":"advanced","tip":"Disables and removes Windows Copilot entirely.","danger":False,
-        "fn": lambda cb: run_ps(r'''$p="HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; Set-ItemProperty $p -Name TurnOffWindowsCopilot -Value 1 -Type DWord -Force; $p2="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot"; If(!(Test-Path $p2)){New-Item $p2 -Force|Out-Null}; Set-ItemProperty $p2 -Name TurnOffWindowsCopilot -Value 1 -Type DWord -Force; Write-Host "Copilot disabled."''', cb)},
-    "disable_notifications": {"label":"Notifications - Disable","cat":"advanced","tip":"Disables all Windows notification popups system-wide.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications" -Name ToastEnabled -Value 0 -Type DWord -Force -EA SilentlyContinue; Set-ItemProperty "HKCU:\Software\Policies\Microsoft\Windows\CurrentVersion\PushNotifications" -Name NoToastApplicationNotification -Value 1 -Type DWord -Force -EA SilentlyContinue; Write-Host "Notifications disabled."', cb)},
-    "disable_storage_sense": {"label":"Storage Sense - Disable","cat":"advanced","tip":"Stops auto-deletion of temp files and recycle bin contents.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy" -Name 01 -Value 0 -Type DWord -Force -EA SilentlyContinue; Write-Host "Storage Sense disabled."', cb)},
-    "disable_teredo": {"label":"Teredo - Disable","cat":"advanced","tip":"Disables IPv6 tunnelling protocol. Slight network improvement.","danger":False,
-        "fn": lambda cb: run_cmd("netsh interface teredo set state disabled", cb)},
-    "visual_performance": {"label":"Visual Effects - Best Performance","cat":"advanced","tip":"Disables all animations. Snappier but less pretty.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name VisualFXSetting -Value 2 -Type DWord -Force -EA SilentlyContinue; Write-Host "Visual effects set to performance."', cb)},
-    "disable_windows_ai": {"label":"Windows AI / Recall - Disable","cat":"advanced","tip":"Disables Recall and AI features. Recommended for privacy.","danger":False,
-        "fn": lambda cb: run_ps(r'$p="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; Set-ItemProperty $p -Name AllowRecallEnablement -Value 0 -Type DWord -Force; Set-ItemProperty $p -Name DisableAIDataAnalysis -Value 1 -Type DWord -Force; Write-Host "Windows AI disabled."', cb)},
-    "remove_xbox": {"label":"Xbox Components - Remove","cat":"advanced","tip":"Removes Xbox apps and overlay. Will break Game Pass.","danger":True,
-        "fn": lambda cb: run_ps(r'@("Microsoft.XboxGameOverlay","Microsoft.XboxGamingOverlay","Microsoft.XboxIdentityProvider","Microsoft.XboxSpeechToTextOverlay") | foreach { Get-AppxPackage -Name $_ -EA SilentlyContinue | Remove-AppxPackage -EA SilentlyContinue }; Write-Host "Xbox components removed."', cb)},
-
-    # ── PREFERENCES (WinUtil) ──
-    "pref_bsod_verbose": {"label":"BSoD Verbose Mode","cat":"preference","tip":"Shows detailed BSOD info (error codes, driver names) instead of just a sad face.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl" -Name DisplayParameters -Value 1 -Type DWord -Force; Write-Host "BSoD verbose mode enabled."', cb)},
-    "pref_dark_mode": {"label":"Dark Theme","cat":"preference","tip":"Enables system-wide dark theme.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name AppsUseLightTheme -Value 0 -Type DWord -Force; Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name SystemUsesLightTheme -Value 0 -Type DWord -Force; Write-Host "Dark mode enabled."', cb)},
-    "pref_file_ext": {"label":"Show File Extensions","cat":"preference","tip":"Shows .exe, .pdf, etc in Explorer. Highly recommended.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name HideFileExt -Value 0 -Type DWord -Force; Write-Host "File extensions visible."', cb)},
-    "pref_hidden_files": {"label":"Show Hidden Files","cat":"preference","tip":"Shows hidden files in Explorer.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name Hidden -Value 1 -Type DWord -Force; Write-Host "Hidden files visible."', cb)},
-    "pref_no_mouse_accel": {"label":"Disable Mouse Acceleration","cat":"preference","tip":"Removes pointer acceleration. Better for gaming.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Control Panel\Mouse" -Name MouseSpeed -Value 0 -Type String -Force; Set-ItemProperty "HKCU:\Control Panel\Mouse" -Name MouseThreshold1 -Value 0 -Type String -Force; Set-ItemProperty "HKCU:\Control Panel\Mouse" -Name MouseThreshold2 -Value 0 -Type String -Force; Write-Host "Mouse accel disabled."', cb)},
-    "pref_numlock": {"label":"Num Lock on Startup","cat":"preference","tip":"Enables Num Lock when Windows starts.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Control Panel\Keyboard" -Name InitialKeyboardIndicators -Value 2 -Type String -Force; Write-Host "Num Lock enabled."', cb)},
-    "pref_no_sticky_keys": {"label":"Disable Sticky Keys","cat":"preference","tip":"Stops the Shift x5 popup. Essential for gaming.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Control Panel\Accessibility\StickyKeys" -Name Flags -Value "506" -Type String -Force; Write-Host "Sticky Keys disabled."', cb)},
-    "pref_hide_search": {"label":"Hide Taskbar Search","cat":"preference","tip":"Hides search from taskbar. Win key still opens search.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search" -Name SearchboxTaskbarMode -Value 0 -Type DWord -Force; Write-Host "Search hidden."', cb)},
-    "pref_hide_taskview": {"label":"Hide Task View Button","cat":"preference","tip":"Hides Task View from the taskbar.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name ShowTaskViewButton -Value 0 -Type DWord -Force; Write-Host "Task View hidden."', cb)},
-    "pref_left_taskbar": {"label":"Taskbar Icons - Move Left","cat":"preference","tip":"Moves taskbar icons to the left (Win11).","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name TaskbarAl -Value 0 -Type DWord -Force; Write-Host "Taskbar left-aligned."', cb)},
-    "pref_classic_menu": {"label":"Classic Right-Click Menu","cat":"preference","tip":"Restores the full context menu in Win11.","danger":False,
-        "fn": lambda cb: run_ps(r'$p="HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; Set-ItemProperty $p -Name "(Default)" -Value "" -Force; Stop-Process -Name explorer -Force -EA SilentlyContinue; Write-Host "Classic context menu restored."', cb)},
-    "pref_no_startup_delay": {"label":"Remove Startup Delay","cat":"preference","tip":"Removes the artificial delay before startup programs.","danger":False,
-        "fn": lambda cb: run_ps(r'$p="HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; Set-ItemProperty $p -Name StartupDelayInMSec -Value 0 -Type DWord -Force; Write-Host "Startup delay removed."', cb)},
-    "pref_high_perf": {"label":"High Performance Power Plan","cat":"preference","tip":"Best for desktops. Not recommended on battery.","danger":False,
-        "fn": lambda cb: run_cmd("powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", cb)},
-    "pref_no_bing_search": {"label":"Start Menu Bing Search - Disable","cat":"preference","tip":"Removes web/Bing results from Start Menu search. Only shows local results.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search" -Name BingSearchEnabled -Value 0 -Type DWord -Force -EA SilentlyContinue; Set-ItemProperty "HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name DisableSearchBoxSuggestions -Value 1 -Type DWord -Force -EA SilentlyContinue; Write-Host "Bing search disabled."', cb)},
-    "pref_no_recommendations": {"label":"Start Menu Recommendations - Disable","cat":"preference","tip":"Disables the Recommended section in the Win11 Start Menu.","danger":False,
-        "fn": lambda cb: run_ps(r'$p="HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; If(!(Test-Path $p)){New-Item $p -Force|Out-Null}; Set-ItemProperty $p -Name HideRecommendedSection -Value 1 -Type DWord -Force; Write-Host "Start Menu recommendations disabled."', cb)},
-    "pref_multiplane_overlay": {"label":"Multiplane Overlay - Disable","cat":"preference","tip":"Disables MPO which can cause flickering or rendering issues on some GPUs.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\Dwm" -Name OverlayTestMode -Value 5 -Type DWord -Force -EA SilentlyContinue; Write-Host "Multiplane Overlay disabled."', cb)},
-    "pref_scrollbars_visible": {"label":"Scrollbars Always Visible","cat":"preference","tip":"Forces scrollbars to always be visible instead of auto-hiding.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Control Panel\Accessibility" -Name DynamicScrollbars -Value 0 -Type DWord -Force -EA SilentlyContinue; Write-Host "Scrollbars always visible."', cb)},
-    "pref_s0_sleep_net": {"label":"S0 Sleep Network - Disable","cat":"preference","tip":"Disables network connectivity during Modern Standby (S0). Saves battery and improves privacy.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\f15576e8-98b7-4186-b944-eafa664402d9" -Name Attributes -Value 2 -Type DWord -Force -EA SilentlyContinue; powercfg /setdcvalueindex SCHEME_CURRENT f15576e8-98b7-4186-b944-eafa664402d9 12bbebe6-58d6-4636-95bb-3217ef867c1a 0; powercfg /setacvalueindex SCHEME_CURRENT f15576e8-98b7-4186-b944-eafa664402d9 12bbebe6-58d6-4636-95bb-3217ef867c1a 0; powercfg /setactive SCHEME_CURRENT; Write-Host "S0 sleep network disabled."', cb)},
-    "pref_no_snap_flyout": {"label":"Snap Flyout - Disable","cat":"preference","tip":"Disables the snap layout popup when hovering over maximize button.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name EnableSnapAssistFlyout -Value 0 -Type DWord -Force -EA SilentlyContinue; Write-Host "Snap flyout disabled."', cb)},
-    "pref_no_snap_suggestions": {"label":"Snap Suggestions - Disable","cat":"preference","tip":"Disables suggestions for what to snap next to a window.","danger":False,
-        "fn": lambda cb: run_ps(r'Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name SnapAssist -Value 0 -Type DWord -Force -EA SilentlyContinue; Write-Host "Snap suggestions disabled."', cb)},
-}
-
-PRESETS = {
-    "Gaming PC": {"tweaks":["disable_telemetry","end_task_rightclick","disable_fullscreen_opt","pref_no_mouse_accel","pref_no_sticky_keys","disable_bg_apps","visual_performance","pref_no_startup_delay","pref_high_perf","remove_widgets","disable_windows_ai","pref_multiplane_overlay","pref_no_bing_search"]},
-    "Privacy": {"tweaks":["disable_telemetry","activity_history","consumer_features","disable_location","disable_ps7_telemetry","disable_windows_ai","remove_onedrive","disable_store_search","remove_copilot","disable_notifications","pref_no_bing_search"]},
-    "Fresh Install": {"tweaks":["pref_file_ext","pref_hidden_files","pref_dark_mode","pref_no_sticky_keys","disable_telemetry","consumer_features","pref_classic_menu","pref_no_startup_delay","end_task_rightclick","remove_widgets","start_menu_layout","pref_no_bing_search","pref_no_recommendations","pref_bsod_verbose"]},
-    "Performance": {"tweaks":["pref_high_perf","disable_bg_apps","visual_performance","pref_no_startup_delay","disable_telemetry","services_manual","disable_storage_sense","disable_fullscreen_opt","pref_multiplane_overlay"]},
-}
-
-# ═══ SYSTEM INFO ══════════════════════════════════════════════════════════════
-
+# ─────────────────────────── SYSTEM INFO ────────────────────────────
 def get_system_info(cb=None):
-    if cb: cb("[INFO] Gathering system information...")
-    cmd = r'''
-    $info = @{}
-
-    # OS
-    $os = Get-CimInstance Win32_OperatingSystem
-    $info["os_name"] = $os.Caption
-    $info["os_version"] = $os.Version
-    $info["os_build"] = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion").DisplayVersion
-    $info["os_arch"] = $os.OSArchitecture
-    $info["install_date"] = $os.InstallDate.ToString("yyyy-MM-dd")
-
-    # CPU
-    $cpu = Get-CimInstance Win32_Processor
-    $info["cpu_name"] = $cpu.Name.Trim()
-    $info["cpu_cores"] = $cpu.NumberOfCores
-    $info["cpu_threads"] = $cpu.NumberOfLogicalProcessors
-    $info["cpu_clock"] = [math]::Round($cpu.MaxClockSpeed / 1000, 2)
-
-    # RAM
-    $ram = Get-CimInstance Win32_PhysicalMemory
-    $totalGB = [math]::Round(($ram | Measure-Object Capacity -Sum).Sum / 1GB, 1)
-    $speed = ($ram | Select-Object -First 1).Speed
-    $type = ($ram | Select-Object -First 1).SMBIOSMemoryType
-    $typeStr = switch($type) { 26 {"DDR4"} 34 {"DDR5"} 24 {"DDR3"} default {"DDR"} }
-    $sticks = $ram.Count
-    $info["ram_total"] = "$totalGB GB"
-    $info["ram_speed"] = "$speed MHz"
-    $info["ram_type"] = $typeStr
-    $info["ram_sticks"] = "$sticks stick(s)"
-
-    # GPU (registry method for accurate VRAM on modern GPUs)
-    $gpus = Get-CimInstance Win32_VideoController
-    $gpuList = @()
-    foreach ($g in $gpus) {
-        # AdapterRAM is 32-bit and caps at 4GB. Use registry for real VRAM.
-        $vram = $null
-        try {
-            $regPath = "HKLM:\SYSTEM\ControlSet001\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10135}"
-            Get-ChildItem $regPath -EA SilentlyContinue | ForEach-Object {
-                $desc = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).DriverDesc
-                if ($desc -eq $g.Name) {
-                    $qw = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).HardwareInformation.qwMemorySize
-                    if ($qw) { $vram = [math]::Round([uint64]$qw / 1GB, 0) }
-                    if (!$vram) {
-                        $adMem = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).HardwareInformation.AdapterString
-                        $dedVid = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).'HardwareInformation.MemorySize'
-                        if ($dedVid) { $vram = [math]::Round([uint64]("0x" + [System.BitConverter]::ToString($dedVid[7..0]).Replace("-","")) / 1GB, 0) }
+    script = r'''
+$info = @{}
+# OS
+$os = Get-CimInstance Win32_OperatingSystem
+$info["os_name"]    = $os.Caption
+$info["os_version"] = $os.Version
+$info["os_build"]   = $os.BuildNumber
+$info["os_arch"]    = $os.OSArchitecture
+$info["os_install"] = $os.InstallDate.ToString("yyyy-MM-dd")
+$boot = $os.LastBootUpTime
+$uptime = (Get-Date) - $boot
+$info["uptime"] = "$([int]$uptime.TotalHours)h $($uptime.Minutes)m"
+# CPU
+$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+$info["cpu_name"]    = $cpu.Name.Trim()
+$info["cpu_cores"]   = "$($cpu.NumberOfCores) cores / $($cpu.NumberOfLogicalProcessors) threads"
+$info["cpu_clock"]   = "$([math]::Round($cpu.MaxClockSpeed/1000,1)) GHz"
+# RAM
+$ram = Get-CimInstance Win32_PhysicalMemory
+$totalGB = [math]::Round(($ram | Measure-Object -Property Capacity -Sum).Sum / 1GB, 0)
+$speed   = ($ram | Select-Object -First 1).Speed
+$sticks  = $ram.Count
+$type    = switch(($ram | Select-Object -First 1).SMBIOSMemoryType){
+    26{"DDR4"} 34{"DDR5"} 24{"DDR3"} default{"DDR"}
+}
+$info["ram"] = "${totalGB}GB ${type} ${speed}MHz (${sticks} stick$(if($sticks -ne 1){'s'}))"
+# GPU — use registry GUID {4d36e968-e325-11ce-bfc1-08002be10318} for real VRAM
+$gpus = Get-CimInstance Win32_VideoController
+$gpuList = @()
+foreach ($g in $gpus) {
+    $vram = $null
+    try {
+        $regPath = "HKLM:\SYSTEM\ControlSet001\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        Get-ChildItem $regPath -EA SilentlyContinue | ForEach-Object {
+            $desc = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).DriverDesc
+            if ($desc -and $desc -eq $g.Name) {
+                $qw = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).'HardwareInformation.qwMemorySize'
+                if ($qw -and [uint64]$qw -gt 0) {
+                    $vram = [math]::Round([uint64]$qw / 1GB, 0)
+                }
+                if (!$vram) {
+                    $memBytes = (Get-ItemProperty $_.PSPath -EA SilentlyContinue).'HardwareInformation.MemorySize'
+                    if ($memBytes) {
+                        $bytes = [System.BitConverter]::ToUInt64([byte[]]$memBytes, 0)
+                        if ($bytes -gt 0) { $vram = [math]::Round($bytes / 1GB, 0) }
                     }
                 }
             }
-        } catch {}
-        if (!$vram -or $vram -le 0) {
-            # Fallback to AdapterRAM
-            $raw = $g.AdapterRAM
-            if ($raw -gt 0) { $vram = [math]::Round($raw / 1GB, 0) } else { $vram = $null }
         }
-        $vramStr = if ($vram -and $vram -gt 0) { "$vram GB" } else { "Shared" }
-        $gpuList += "$($g.Name) ($vramStr)"
+    } catch {}
+    if (!$vram -or $vram -le 0) {
+        $raw = $g.AdapterRAM
+        if ($raw -gt 0) { $vram = [math]::Round($raw / 1GB, 0) } else { $vram = $null }
     }
-    $info["gpu"] = $gpuList -join " | "
-    $info["gpu_driver"] = ($gpus | Select-Object -First 1).DriverVersion
+    $vramStr = if ($vram -and $vram -gt 0) { "${vram}GB" } else { "Shared" }
+    $gpuList += "$($g.Name) ($vramStr)"
+}
+$info["gpu"]        = $gpuList -join " | "
+$info["gpu_driver"] = ($gpus | Select-Object -First 1).DriverVersion
+# Storage
+$disks = Get-CimInstance Win32_DiskDrive
+$diskList = @()
+foreach ($d in $disks) {
+    $sizeGB = [math]::Round($d.Size/1GB,0)
+    $mediaType = if($d.MediaType -match "SSD|Solid"){"SSD"}elseif($d.MediaType -match "HDD|Fixed"){"HDD"}else{"Drive"}
+    $diskList += "$($d.Model) (${sizeGB}GB $mediaType)"
+}
+$info["disks"] = $diskList -join " | "
+$vols = Get-PSDrive -PSProvider FileSystem | Where-Object {$_.Used -ne $null}
+$volList = @()
+foreach ($v in $vols) {
+    $free = [math]::Round($v.Free/1GB,1)
+    $total= [math]::Round(($v.Used+$v.Free)/1GB,1)
+    $volList += "$($v.Name): ${free}GB free / ${total}GB"
+}
+$info["volumes"] = $volList -join " | "
+# Motherboard & BIOS
+$mb   = Get-CimInstance Win32_BaseBoard
+$bios = Get-CimInstance Win32_BIOS
+$info["motherboard"] = "$($mb.Manufacturer) $($mb.Product)"
+$info["bios"]        = "$($bios.Manufacturer) $($bios.SMBIOSBIOSVersion)"
+# Security
+try { $sb = Confirm-SecureBootUEFI; $info["secure_boot"] = if($sb){"Enabled"}else{"Disabled"} } catch { $info["secure_boot"] = "N/A" }
+try { $tpm = Get-Tpm; $info["tpm"] = if($tpm.TpmPresent){"v$($tpm.ManufacturerVersionInfo) Present"}else{"Not Present"} } catch { $info["tpm"] = "N/A" }
+try {
+    $def = Get-MpComputerStatus -EA SilentlyContinue
+    $info["defender"] = if($def){ "$(if($def.RealTimeProtectionEnabled){'Active'}else{'Disabled'}) — Defs: $($def.AntivirusSignatureLastUpdated.ToString('yyyy-MM-dd'))" } else { "N/A" }
+} catch { $info["defender"] = "N/A" }
+# Network
+$net = Get-CimInstance Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true} | Select-Object -First 1
+$info["network"] = if($net){"$($net.Description) | MAC: $($net.MACAddress)"}else{"N/A"}
+# Power
+try {
+    $plan = powercfg /getactivescheme 2>$null
+    $info["power"] = if($plan -match '\((.+)\)'){"Active: $($Matches[1])"}else{"N/A"}
+} catch { $info["power"] = "N/A" }
+$info | ConvertTo-Json -Compress
+'''
+    raw = run_ps(script, cb)
+    try:
+        lines = [l for l in raw.splitlines() if l.strip().startswith("{")]
+        if lines:
+            return json.loads(lines[-1])
+    except:
+        pass
+    return {}
 
-    # Storage
-    $disks = Get-CimInstance Win32_DiskDrive
-    $diskList = @()
-    foreach ($d in $disks) {
-        $sizeGB = [math]::Round($d.Size / 1GB, 0)
-        $diskList += "$($d.Model) (${sizeGB} GB, $($d.MediaType))"
+
+# ─────────────────────────── REPAIR ─────────────────────────────────
+def run_dism(cb=None):
+    return run_ps("DISM /Online /Cleanup-Image /RestoreHealth", cb)
+
+def run_sfc(cb=None):
+    return run_ps("sfc /scannow", cb)
+
+def run_chkdsk(cb=None):
+    return run_ps("chkdsk C: /f /r /x", cb)
+
+
+# ─────────────────────────── CLEANUP ────────────────────────────────
+def clean_temp(cb=None):
+    if cb: cb("[INFO] Cleaning temp files...")
+    script = r'''
+$dirs = @($env:TEMP, $env:TMP, "C:\Windows\Temp", "C:\Windows\Prefetch")
+$count = 0
+foreach ($d in $dirs) {
+    if (Test-Path $d) {
+        Get-ChildItem $d -Recurse -Force -EA SilentlyContinue | Remove-Item -Recurse -Force -EA SilentlyContinue
+        $count++
     }
-    $info["storage_drives"] = $diskList -join " | "
+}
+Write-Host "[OK] Temp folders cleaned ($count directories)"
+'''
+    return run_ps(script, cb)
 
-    # Partitions with free space
-    $vols = Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -eq 3 }
-    $volList = @()
-    foreach ($v in $vols) {
-        $totalG = [math]::Round($v.Size / 1GB, 1)
-        $freeG = [math]::Round($v.FreeSpace / 1GB, 1)
-        $volList += "$($v.DeviceID) $freeG GB free / $totalG GB"
+def clean_update_cache(cb=None):
+    if cb: cb("[INFO] Cleaning Windows Update cache...")
+    script = r'''
+Stop-Service -Name wuauserv -Force -EA SilentlyContinue
+Stop-Service -Name bits    -Force -EA SilentlyContinue
+Remove-Item "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -EA SilentlyContinue
+Start-Service -Name wuauserv -EA SilentlyContinue
+Start-Service -Name bits    -EA SilentlyContinue
+Write-Host "[OK] Windows Update cache cleared"
+'''
+    return run_ps(script, cb)
+
+def flush_dns(cb=None):
+    if cb: cb("[INFO] Flushing DNS cache...")
+    return run_ps('ipconfig /flushdns; Write-Host "[OK] DNS cache flushed"', cb)
+
+def reset_network(cb=None):
+    if cb: cb("[INFO] Resetting network stack...")
+    script = r'''
+netsh int ip reset
+netsh winsock reset
+netsh advfirewall reset
+ipconfig /flushdns
+ipconfig /release
+ipconfig /renew
+Write-Host "[OK] Network stack reset complete — reboot recommended"
+'''
+    return run_ps(script, cb)
+
+def empty_recycle(cb=None):
+    if cb: cb("[INFO] Emptying Recycle Bin...")
+    script = r'''
+$shell = New-Object -ComObject Shell.Application
+$shell.Namespace(0xA).Items() | ForEach-Object { Remove-Item $_.Path -Recurse -Force -EA SilentlyContinue }
+Write-Host "[OK] Recycle Bin emptied"
+'''
+    return run_ps(script, cb)
+
+def clean_event_logs(cb=None):
+    if cb: cb("[INFO] Clearing event logs...")
+    script = r'''
+Get-EventLog -List | ForEach-Object { Clear-EventLog -LogName $_.Log -EA SilentlyContinue }
+Write-Host "[OK] Event logs cleared"
+'''
+    return run_ps(script, cb)
+
+
+# ─────────────────────────── DEPENDENCIES ───────────────────────────
+def install_dotnet(version: str, cb=None):
+    if cb: cb(f"[INFO] Installing .NET {version} runtime...")
+    script = f'winget install --id Microsoft.DotNet.Runtime.{version} --accept-source-agreements --accept-package-agreements -e; Write-Host "[OK] .NET {version} install complete"'
+    return run_ps(script, cb)
+
+def install_vcredist(cb=None):
+    if cb: cb("[INFO] Installing VC++ Redistributables...")
+    script = r'''
+$ids = @(
+    "Microsoft.VCRedist.2005.x86","Microsoft.VCRedist.2005.x64",
+    "Microsoft.VCRedist.2008.x86","Microsoft.VCRedist.2008.x64",
+    "Microsoft.VCRedist.2010.x86","Microsoft.VCRedist.2010.x64",
+    "Microsoft.VCRedist.2012.x86","Microsoft.VCRedist.2012.x64",
+    "Microsoft.VCRedist.2013.x86","Microsoft.VCRedist.2013.x64",
+    "Microsoft.VCRedist.2015+.x86","Microsoft.VCRedist.2015+.x64"
+)
+foreach ($id in $ids) {
+    winget install --id $id --accept-source-agreements --accept-package-agreements -e --silent 2>$null
+}
+Write-Host "[OK] All VC++ Redistributables installed"
+'''
+    return run_ps(script, cb)
+
+def install_directx(cb=None):
+    if cb: cb("[INFO] Installing DirectX...")
+    script = r'winget install --id Microsoft.DirectX --accept-source-agreements --accept-package-agreements -e; Write-Host "[OK] DirectX install complete"'
+    return run_ps(script, cb)
+
+def install_webview2(cb=None):
+    if cb: cb("[INFO] Installing WebView2 Runtime...")
+    script = r'winget install --id Microsoft.EdgeWebView2Runtime --accept-source-agreements --accept-package-agreements -e; Write-Host "[OK] WebView2 install complete"'
+    return run_ps(script, cb)
+
+def install_xna(cb=None):
+    if cb: cb("[INFO] Installing XNA Framework...")
+    script = r'winget install --id Microsoft.XNAFramework --accept-source-agreements --accept-package-agreements -e; Write-Host "[OK] XNA install complete"'
+    return run_ps(script, cb)
+
+
+# ─────────────────────────── APP INSTALL ────────────────────────────
+def install_app(app_id: str, manager: str, cb=None):
+    if cb: cb(f"[INFO] Installing {app_id} via {manager}...")
+    if manager == "winget":
+        script = f'winget install --id "{app_id}" --accept-source-agreements --accept-package-agreements -e; Write-Host "[OK] {app_id} install complete"'
+    else:
+        script = f'choco install {app_id} -y; Write-Host "[OK] {app_id} install complete"'
+    return run_ps(script, cb)
+
+
+# ─────────────────────────── TWEAKS ─────────────────────────────────
+# All verified against WinUtil (winutil.christitus.com)
+
+def tweak_telemetry(enable=False, cb=None):
+    """WinUtil: WPFTweaksTelemetry — 12 registry keys + services + scripts"""
+    if cb: cb(f"[INFO] {'Disabling' if not enable else 'Enabling'} Telemetry (WinUtil-verified, 12 keys)...")
+    v = "1" if enable else "0"
+    v_inv = "0" if enable else "1"  # for keys that are inverted (restrict = 1 to disable)
+    startup = "Automatic" if enable else "Disabled"
+    consent = "1" if enable else "2"
+    script = f'''
+# 12 registry keys from WinUtil WPFTweaksTelemetry
+$reg = @(
+    @{{P="HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo";N="Enabled";V={v}}},
+    @{{P="HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Privacy";N="TailoredExperiencesWithDiagnosticDataEnabled";V={v}}},
+    @{{P="HKCU:\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy";N="HasAccepted";V={v}}},
+    @{{P="HKCU:\\Software\\Microsoft\\Input\\TIPC";N="Enabled";V={v}}},
+    @{{P="HKCU:\\Software\\Microsoft\\InputPersonalization";N="RestrictImplicitInkCollection";V={v_inv}}},
+    @{{P="HKCU:\\Software\\Microsoft\\InputPersonalization";N="RestrictImplicitTextCollection";V={v_inv}}},
+    @{{P="HKCU:\\Software\\Microsoft\\InputPersonalization\\TrainedDataStore";N="HarvestContacts";V={v}}},
+    @{{P="HKCU:\\Software\\Microsoft\\Personalization\\Settings";N="AcceptedPrivacyPolicy";V={v}}},
+    @{{P="HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\DataCollection";N="AllowTelemetry";V={v}}},
+    @{{P="HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";N="Start_TrackProgs";V={v}}},
+    @{{P="HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\System";N="PublishUserActivities";V={v}}},
+    @{{P="HKCU:\\Software\\Microsoft\\Siuf\\Rules";N="NumberOfSIUFInPeriod";V={v}}}
+)
+foreach ($r in $reg) {{
+    If(!(Test-Path $r.P)){{New-Item -Path $r.P -Force|Out-Null}}
+    Set-ItemProperty -Path $r.P -Name $r.N -Value $r.V -Type DWord -Force -EA SilentlyContinue
+}}
+# Services
+Set-Service -Name diagtrack -StartupType {startup} -EA SilentlyContinue
+Set-Service -Name wermgr    -StartupType {startup} -EA SilentlyContinue
+# Defender sample submission
+Set-MpPreference -SubmitSamplesConsent {consent} -EA SilentlyContinue
+# Remove SIUF PeriodInNanoSeconds if disabling
+{"Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Siuf\\Rules' -Name PeriodInNanoSeconds -EA SilentlyContinue" if not enable else ""}
+Write-Host "[OK] Telemetry {'enabled' if enable else 'disabled'} (12 registry keys + services)"
+'''
+    return run_ps(script, cb)
+
+def tweak_activity_history(enable=False, cb=None):
+    """WinUtil: WPFTweaksActivity — 3 registry keys"""
+    if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} Activity History...")
+    v = "1" if enable else "0"
+    script = f'''
+$p = "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\System"
+If(!(Test-Path $p)){{New-Item -Path $p -Force|Out-Null}}
+Set-ItemProperty $p -Name EnableActivityFeed     -Value {v} -Type DWord -Force -EA SilentlyContinue
+Set-ItemProperty $p -Name PublishUserActivities  -Value {v} -Type DWord -Force -EA SilentlyContinue
+Set-ItemProperty $p -Name UploadUserActivities   -Value {v} -Type DWord -Force -EA SilentlyContinue
+Write-Host "[OK] Activity History {'enabled' if enable else 'disabled'} (3 keys)"
+'''
+    return run_ps(script, cb)
+
+def tweak_location(enable=False, cb=None):
+    """WinUtil: WPFTweaksLocation — 3 registry keys + lfsvc service (exact match)"""
+    if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} Location Tracking...")
+    consent_val  = "Allow" if enable else "Deny"
+    sensor_val   = "1" if enable else "0"
+    maps_val     = "1" if enable else "0"
+    svc_start    = "Manual" if enable else "Disabled"   # OriginalType is Manual per WinUtil
+    script = f'''
+# Key 1: ConsentStore — Type is String, not DWord
+$p1 = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\location"
+If(!(Test-Path $p1)){{New-Item -Path $p1 -Force|Out-Null}}
+Set-ItemProperty $p1 -Name Value -Value "{consent_val}" -Type String -Force -EA SilentlyContinue
+# Key 2: SensorPermissionState — DWord
+$p2 = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Sensor\\Overrides\\{{BFA794E4-F964-4FDB-90F6-51056BFE4B44}}"
+If(!(Test-Path $p2)){{New-Item -Path $p2 -Force|Out-Null}}
+Set-ItemProperty $p2 -Name SensorPermissionState -Value {sensor_val} -Type DWord -Force -EA SilentlyContinue
+# Key 3: Maps AutoUpdate — DWord (HKLM:\SYSTEM\Maps per WinUtil)
+$p3 = "HKLM:\\SYSTEM\\Maps"
+If(!(Test-Path $p3)){{New-Item -Path $p3 -Force|Out-Null}}
+Set-ItemProperty $p3 -Name AutoUpdateEnabled -Value {maps_val} -Type DWord -Force -EA SilentlyContinue
+# Service: lfsvc — OriginalType is Manual
+Set-Service -Name lfsvc -StartupType {svc_start} -EA SilentlyContinue
+Write-Host "[OK] Location Tracking {'enabled' if enable else 'disabled'} (3 keys + lfsvc service)"
+'''
+    return run_ps(script, cb)
+
+def tweak_consumer_features(enable=False, cb=None):
+    """WinUtil: WPFTweaksConsumerFeatures — 1 registry key (exact match)"""
+    if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} Consumer Features...")
+    script = f'''
+$p = "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent"
+If(!(Test-Path $p)){{New-Item -Path $p -Force|Out-Null}}
+{"Remove-ItemProperty $p -Name DisableWindowsConsumerFeatures -EA SilentlyContinue" if enable else 'Set-ItemProperty $p -Name DisableWindowsConsumerFeatures -Value 1 -Type DWord -Force -EA SilentlyContinue'}
+Write-Host "[OK] Consumer Features {'enabled (key removed)' if enable else 'disabled'}"
+'''
+    return run_ps(script, cb)
+
+def tweak_hibernation(enable=False, cb=None):
+    """WinUtil: WPFTweaksHiber — 2 registry keys + powercfg (exact match)"""
+    if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} Hibernation...")
+    hiber_val  = "1" if enable else "0"
+    flyout_val = "1" if enable else "0"
+    cmd        = "powercfg.exe /hibernate on" if enable else "powercfg.exe /hibernate off"
+    script = f'''
+# Key 1: HibernateEnabled
+$p1 = "HKLM:\\System\\CurrentControlSet\\Control\\Session Manager\\Power"
+Set-ItemProperty $p1 -Name HibernateEnabled -Value {hiber_val} -Type DWord -Force -EA SilentlyContinue
+# Key 2: ShowHibernateOption (hide/show from power menu)
+$p2 = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FlyoutMenuSettings"
+If(!(Test-Path $p2)){{New-Item -Path $p2 -Force|Out-Null}}
+Set-ItemProperty $p2 -Name ShowHibernateOption -Value {flyout_val} -Type DWord -Force -EA SilentlyContinue
+# InvokeScript
+{cmd}
+Write-Host "[OK] Hibernation {'enabled' if enable else 'disabled'} (2 registry keys + powercfg)"
+'''
+    return run_ps(script, cb)
+
+def tweak_fast_startup(enable=True, cb=None):
+    if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} Fast Startup...")
+    v = "1" if enable else "0"
+    script = f'''
+$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power"
+Set-ItemProperty $p -Name HiberbootEnabled -Value {v} -Type DWord -Force -EA SilentlyContinue
+Write-Host "[OK] Fast Startup {'enabled' if enable else 'disabled'}"
+'''
+    return run_ps(script, cb)
+
+def tweak_show_extensions(enable=True, cb=None):
+    """WinUtil: WPFToggleShowExt — HideFileExt DWord + Explorer restart (exact match)"""
+    if cb: cb(f"[INFO] {'Showing' if enable else 'Hiding'} file extensions...")
+    v = "0" if enable else "1"
+    script = f'''
+Set-ItemProperty "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced" -Name HideFileExt -Value {v} -Type DWord -Force -EA SilentlyContinue
+# WinUtil InvokeScript: restart Explorer
+Stop-Process -Name explorer -Force -EA SilentlyContinue
+Write-Host "[OK] File extensions {'shown' if enable else 'hidden'} (Explorer restarted)"
+'''
+    return run_ps(script, cb)
+
+def tweak_show_hidden(enable=True, cb=None):
+    """WinUtil: WPFToggleHiddenFiles — Hidden DWord + Explorer restart (exact match)"""
+    if cb: cb(f"[INFO] {'Showing' if enable else 'Hiding'} hidden files...")
+    v = "1" if enable else "0"
+    script = f'''
+Set-ItemProperty "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced" -Name Hidden -Value {v} -Type DWord -Force -EA SilentlyContinue
+# WinUtil InvokeScript: restart Explorer
+Stop-Process -Name explorer -Force -EA SilentlyContinue
+Write-Host "[OK] Hidden files {'shown' if enable else 'hidden'} (Explorer restarted)"
+'''
+    return run_ps(script, cb)
+
+def tweak_copilot(enable=False, cb=None):
+    """WinUtil: WPFTweaksRemoveCopilot — removes Copilot AppX packages (exact match)"""
+    if cb: cb(f"[INFO] {'Restoring' if enable else 'Removing'} Microsoft Copilot...")
+    if not enable:
+        script = r'''
+# WinUtil WPFTweaksRemoveCopilot: remove Copilot AppX packages
+Get-AppxPackage -AllUsers *Copilot* | Remove-AppxPackage -AllUsers -EA SilentlyContinue
+Get-AppxPackage -AllUsers Microsoft.MicrosoftOfficeHub | Remove-AppxPackage -AllUsers -EA SilentlyContinue
+$Appx = (Get-AppxPackage MicrosoftWindows.Client.CoreAI -EA SilentlyContinue).PackageFullName
+if ($Appx) {
+    $Sid = (Get-LocalUser $Env:UserName).Sid.Value
+    New-Item "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\EndOfLife\$Sid\$Appx" -Force -EA SilentlyContinue
+    Remove-AppxPackage $Appx -EA SilentlyContinue
+}
+Write-Host "[OK] Copilot removed"
+'''
+    else:
+        # WinUtil UndoScript: reinstall via winget
+        script = r'''
+winget install --name Copilot --source msstore --accept-package-agreements --accept-source-agreements --silent
+Write-Host "[OK] Copilot reinstalled via winget"
+'''
+    return run_ps(script, cb)
+
+def tweak_widgets(remove=True, cb=None):
+    """WinUtil: WPFTweaksWidget — stops Widget process first, removes both AppX packages (exact match)"""
+    if cb: cb(f"[INFO] {'Removing' if remove else 'Restoring'} Widgets...")
+    if remove:
+        script = r'''
+# WinUtil: stop process first or removal may fail
+Get-Process *Widget* | Stop-Process -Force -EA SilentlyContinue
+Get-AppxPackage Microsoft.WidgetsPlatformRuntime -AllUsers | Remove-AppxPackage -AllUsers -EA SilentlyContinue
+Get-AppxPackage MicrosoftWindows.Client.WebExperience -AllUsers | Remove-AppxPackage -AllUsers -EA SilentlyContinue
+# Restart Explorer
+Stop-Process -Name explorer -Force -EA SilentlyContinue
+Write-Host "[OK] Widgets removed (both AppX packages)"
+'''
+    else:
+        script = r'''
+# WinUtil UndoScript: re-register from WindowsApps directory
+Add-AppxPackage -Register "C:\Program Files\WindowsApps\Microsoft.WidgetsPlatformRuntime*\AppxManifest.xml" -DisableDevelopmentMode -EA SilentlyContinue
+Add-AppxPackage -Register "C:\Program Files\WindowsApps\MicrosoftWindows.Client.WebExperience*\AppxManifest.xml" -DisableDevelopmentMode -EA SilentlyContinue
+Write-Host "[OK] Widgets restored (attempted re-register from WindowsApps)"
+'''
+    return run_ps(script, cb)
+
+def tweak_services(optimize=True, cb=None):
+    """WinUtil: WPFTweaksServices — exact 5 services + SvcHostSplitThreshold (exact match)"""
+    if cb: cb("[INFO] Setting services per WinUtil (5 services + SvcHostSplitThreshold)...")
+    if optimize:
+        script = r'''
+# WinUtil exact service list — CscService, DiagTrack, MapsBroker, StorSvc, SharedAccess
+Set-Service -Name CscService    -StartupType Disabled -EA SilentlyContinue
+Set-Service -Name DiagTrack     -StartupType Disabled -EA SilentlyContinue
+Set-Service -Name MapsBroker    -StartupType Manual   -EA SilentlyContinue
+Set-Service -Name StorSvc       -StartupType Manual   -EA SilentlyContinue
+Set-Service -Name SharedAccess  -StartupType Disabled -EA SilentlyContinue
+# SvcHostSplitThreshold — set to total RAM so each svchost hosts its own service
+$Memory = (Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum / 1KB
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control" -Name SvcHostSplitThresholdInKB -Value $Memory -Force -EA SilentlyContinue
+Write-Host "[OK] Services optimized (WinUtil: 5 services + SvcHostSplitThreshold set to ${Memory}KB)"
+'''
+    else:
+        script = r'''
+# Restore original startup types per WinUtil OriginalType values
+Set-Service -Name CscService    -StartupType Manual    -EA SilentlyContinue
+Set-Service -Name DiagTrack     -StartupType Automatic -EA SilentlyContinue
+Set-Service -Name MapsBroker    -StartupType Automatic -EA SilentlyContinue
+Set-Service -Name StorSvc       -StartupType Automatic -EA SilentlyContinue
+Set-Service -Name SharedAccess  -StartupType Automatic -EA SilentlyContinue
+# Restore SvcHostSplitThreshold to Windows default (380000 KB)
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control" -Name SvcHostSplitThresholdInKB -Value 380000 -Force -EA SilentlyContinue
+Write-Host "[OK] Services restored to original startup types"
+'''
+    return run_ps(script, cb)
+
+def tweak_num_lock(enable=True, cb=None):
+    """WinUtil: WPFToggleNumLock — 2 keys (HKU\.Default + HKCU), Type=String (exact match)"""
+    if cb: cb(f"[INFO] Setting NumLock on startup: {enable}...")
+    v = "2" if enable else "0"
+    script = f'''
+# WinUtil sets both HKU\.Default (system default for new logins) and HKCU (current user)
+# Type is String per WinUtil, not DWord
+Set-ItemProperty "HKU:\\.Default\\Control Panel\\Keyboard" -Name InitialKeyboardIndicators -Value "{v}" -Type String -Force -EA SilentlyContinue
+Set-ItemProperty "HKCU:\\Control Panel\\Keyboard" -Name InitialKeyboardIndicators -Value "{v}" -Type String -Force -EA SilentlyContinue
+Write-Host "[OK] NumLock on startup {'enabled' if enable else 'disabled'} (2 keys, String type)"
+'''
+    return run_ps(script, cb)
+
+def tweak_verbose_logon(enable=True, cb=None):
+    if cb: cb(f"[INFO] {'Enabling' if enable else 'Disabling'} verbose logon messages...")
+    v = "1" if enable else "0"
+    script = f'''
+$p = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System"
+Set-ItemProperty $p -Name VerboseStatus -Value {v} -Type DWord -Force -EA SilentlyContinue
+Write-Host "[OK] Verbose logon {'enabled' if enable else 'disabled'}"
+'''
+    return run_ps(script, cb)
+
+def tweak_dark_mode(enable=True, cb=None):
+    """WinUtil: WPFToggleDarkMode — AppsUseLightTheme + SystemUsesLightTheme + Explorer restart (exact match)"""
+    if cb: cb(f"[INFO] Switching to {'Dark' if enable else 'Light'} mode...")
+    v = "0" if enable else "1"
+    script = f'''
+# WinUtil uses HKCU:\SOFTWARE (uppercase) and restarts Explorer
+$p = "HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+If(!(Test-Path $p)){{New-Item -Path $p -Force|Out-Null}}
+Set-ItemProperty $p -Name AppsUseLightTheme    -Value {v} -Type DWord -Force -EA SilentlyContinue
+Set-ItemProperty $p -Name SystemUsesLightTheme -Value {v} -Type DWord -Force -EA SilentlyContinue
+# WinUtil InvokeScript: restart Explorer
+Stop-Process -Name explorer -Force -EA SilentlyContinue
+Write-Host "[OK] {'Dark' if enable else 'Light'} mode applied (Explorer restarted)"
+'''
+    return run_ps(script, cb)
+
+def tweak_power_plan(plan="balanced", cb=None):
+    """Power plans: Ultimate Performance uses WinUtil's exact powercfg -duplicatescheme method.
+    Balanced and Power Saver use standard GUIDs (not WinUtil-sourced, our own additions)."""
+    if cb: cb(f"[INFO] Setting power plan to {plan}...")
+    if plan == "ultimate":
+        # WinUtil: Invoke-WPFUltimatePerformance — duplicate the hidden scheme and activate it
+        script = r'''
+$ultimatePlan = powercfg -list | Select-String -Pattern "Ultimate Performance"
+if ($ultimatePlan) {
+    Write-Host "[INFO] Ultimate Performance plan already installed"
+} else {
+    powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
+    Write-Host "[INFO] Ultimate Performance plan installed"
+}
+$guid = (powercfg -list | Select-String -Pattern "Ultimate Performance" | ForEach-Object { $_ -replace '.*\(([a-f0-9-]+)\).*','$1' }).Trim()
+powercfg /setactive $guid
+Write-Host "[OK] Ultimate Performance power plan activated"
+'''
+    elif plan == "balanced":
+        script = r'powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e; Write-Host "[OK] Balanced power plan set"'
+    else:  # power_saver
+        script = r'powercfg /setactive a1841308-3541-4fab-bc81-f71556f20b4a; Write-Host "[OK] Power Saver plan set"'
+    return run_ps(script, cb)
+
+
+# ─────────────────────────── BROWSER DEBLOAT ────────────────────────
+def debloat_edge(cb=None):
+    """WinUtil: WPFTweaksEdgeDebloat — all 17 verified registry entries"""
+    if cb: cb("[INFO] Debloating Microsoft Edge (WinUtil-verified, 17 entries)...")
+    script = r'''
+$p = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
+If(!(Test-Path $p)){New-Item -Path $p -Force|Out-Null}
+$settings = @{
+    "HideFirstRunExperience"=1;"SendSiteInfoToImproveServices"=0;
+    "MetricsReportingEnabled"=1;"EdgeShoppingAssistantEnabled"=0;
+    "PersonalizationReportingEnabled"=0;"ShowRecommendationsEnabled"=0;
+    "EdgeCollectionsEnabled"=0;"EdgeFollowEnabled"=0;
+    "NetworkPredictionOptions"=2;"SearchSuggestEnabled"=0;
+    "ShowMicrosoftRewards"=0;"SpotlightExperiencesAndRecommendationsEnabled"=0;
+    "TabServicesEnabled"=0;"WebWidget"=0;
+    "StartupBoostEnabled"=0;"BackgroundModeEnabled"=0;
+    "BrowserAddProfileEnabled"=0
+}
+foreach ($k in $settings.Keys) {
+    Set-ItemProperty $p -Name $k -Value $settings[$k] -Type DWord -Force -EA SilentlyContinue
+}
+Write-Host "[OK] Edge debloated (17 entries)"
+'''
+    return run_ps(script, cb)
+
+def debloat_brave(cb=None):
+    """WinUtil: WPFTweaksBraveDebloat — all 12 verified registry entries"""
+    if cb: cb("[INFO] Debloating Brave Browser (WinUtil-verified, 12 entries)...")
+    script = r'''
+$p = "HKLM:\SOFTWARE\Policies\BraveSoftware\Brave"
+If(!(Test-Path $p)){New-Item -Path $p -Force|Out-Null}
+$settings = @{
+    "BraveRewardsDisabled"=1;"BraveWalletDisabled"=1;
+    "BraveVPNDisabled"=1;"MetricsReportingEnabled"=0;
+    "BraveAIChatEnabled"=0;"BraveNewsEnabled"=0;
+    "BraveSearchDefaultInPrivateWindowsEnabled"=0;"BraveShieldsEnabled"=1;
+    "BraveShieldsSettingsVersion"=2;"SafeBrowsingEnabled"=1;
+    "PasswordManagerEnabled"=0;"AutofillCreditCardEnabled"=0
+}
+foreach ($k in $settings.Keys) {
+    Set-ItemProperty $p -Name $k -Value $settings[$k] -Type DWord -Force -EA SilentlyContinue
+}
+Write-Host "[OK] Brave debloated (12 entries)"
+'''
+    return run_ps(script, cb)
+
+
+# ─────────────────────────── APP REMOVAL ────────────────────────────
+def check_app_installed(package_name: str) -> bool:
+    script = f'$r = Get-AppxPackage -Name "*{package_name}*" -EA SilentlyContinue; if($r){{Write-Host "FOUND"}}else{{Write-Host "NOT_FOUND"}}'
+    result = run_ps(script)
+    return "FOUND" in result
+
+def remove_app(package_name: str, display_name: str, cb=None):
+    if cb: cb(f"[INFO] Checking if {display_name} is installed...")
+    if not check_app_installed(package_name):
+        if cb: cb(f"[INFO] {display_name} is not installed — skipping")
+        return
+    if cb: cb(f"[INFO] Removing {display_name}...")
+    script = f'''
+Get-AppxPackage -Name "*{package_name}*" | Remove-AppxPackage -EA SilentlyContinue
+Get-AppxProvisionedPackage -Online | Where-Object DisplayName -like "*{package_name}*" | Remove-AppxProvisionedPackage -Online -EA SilentlyContinue
+$verify = Get-AppxPackage -Name "*{package_name}*" -EA SilentlyContinue
+if(!$verify){{Write-Host "[OK] {display_name} removed successfully"}}else{{Write-Host "[WARN] {display_name} may still be present"}}
+'''
+    return run_ps(script, cb)
+
+
+# ─────────────────────────── DNS ────────────────────────────────────
+DNS_PROVIDERS = {
+    "Cloudflare":         (["1.1.1.1","1.0.0.1"],  ["2606:4700:4700::1111","2606:4700:4700::1001"]),
+    "Google":             (["8.8.8.8","8.8.4.4"],   ["2001:4860:4860::8888","2001:4860:4860::8844"]),
+    "Quad9 (Malware Block)":   (["9.9.9.9","149.112.112.112"], ["2620:fe::fe","2620:fe::9"]),
+    "OpenDNS":            (["208.67.222.222","208.67.220.220"], []),
+    "AdGuard":            (["94.140.14.14","94.140.15.15"], ["2a10:50c0::ad1:ff","2a10:50c0::ad2:ff"]),
+    "Cloudflare Family":  (["1.1.1.3","1.0.0.3"],  ["2606:4700:4700::1113","2606:4700:4700::1003"]),
+    "Automatic (DHCP)":   ([], []),
+}
+
+def set_dns(provider: str, cb=None):
+    if cb: cb(f"[INFO] Setting DNS to {provider}...")
+    ipv4, ipv6 = DNS_PROVIDERS.get(provider, ([], []))
+    if not ipv4:
+        script = r'''
+$adapters = Get-NetAdapter | Where-Object {$_.Status -eq "Up"}
+foreach ($a in $adapters) {
+    Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses
+}
+ipconfig /flushdns
+Write-Host "[OK] DNS reset to automatic (DHCP)"
+'''
+    else:
+        primary, secondary = ipv4[0], ipv4[1] if len(ipv4) > 1 else ipv4[0]
+        pv6_block = ""
+        if ipv6:
+            pv6_block = f'Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses ("{ipv6[0]}","{ipv6[1] if len(ipv6)>1 else ipv6[0]}")'
+        script = f'''
+$adapters = Get-NetAdapter | Where-Object {{$_.Status -eq "Up"}}
+foreach ($a in $adapters) {{
+    Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses ("{primary}","{secondary}")
+}}
+ipconfig /flushdns
+Write-Host "[OK] DNS set to {provider} ({primary} / {secondary})"
+'''
+    return run_ps(script, cb)
+
+
+# ─────────────────────────── WINDOWS UPDATES ────────────────────────
+def set_updates_default(cb=None):
+    """WinUtil: Invoke-WPFUpdatesdefault — removes all custom update policy keys"""
+    if cb: cb("[INFO] Restoring Windows Update to defaults (WinUtil-verified)...")
+    script = r'''
+# WinUtil Invoke-WPFUpdatesdefault: remove all custom policy keys and restore services
+$ErrorActionPreference = 'SilentlyContinue'
+$registryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+$AUregistryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+If (Test-Path $registryPath) {
+    Remove-ItemProperty -Path $registryPath -Name "ExcludeWUDriversInQualityUpdate" -EA SilentlyContinue
+    Remove-ItemProperty -Path $registryPath -Name "DisableWindowsUpdateAccess"      -EA SilentlyContinue
+}
+If (Test-Path $AUregistryPath) {
+    Remove-ItemProperty -Path $AUregistryPath -Name "NoAutoUpdate"      -EA SilentlyContinue
+    Remove-ItemProperty -Path $AUregistryPath -Name "AUOptions"         -EA SilentlyContinue
+    Remove-ItemProperty -Path $AUregistryPath -Name "NoAutoRebootWithLoggedOnUsers" -EA SilentlyContinue
+    Remove-ItemProperty -Path $AUregistryPath -Name "ScheduledInstallDay"  -EA SilentlyContinue
+    Remove-ItemProperty -Path $AUregistryPath -Name "ScheduledInstallTime" -EA SilentlyContinue
+}
+# Also remove DeliveryOptimization override if set by disable
+$doPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config"
+If (Test-Path $doPath) {
+    Remove-ItemProperty -Path $doPath -Name "DODownloadMode" -EA SilentlyContinue
+}
+# Re-enable services disabled by WPFUpdatesdisable
+Set-Service -Name BITS     -StartupType Automatic -EA SilentlyContinue
+Set-Service -Name wuauserv -StartupType Automatic -EA SilentlyContinue
+Set-Service -Name UsoSvc   -StartupType Automatic -EA SilentlyContinue
+# Re-enable update scheduled tasks
+$Tasks = '\Microsoft\Windows\InstallService\*','\Microsoft\Windows\UpdateOrchestrator\*','\Microsoft\Windows\UpdateAssistant\*','\Microsoft\Windows\WaaSMedic\*','\Microsoft\Windows\WindowsUpdate\*','\Microsoft\WindowsUpdate\*'
+foreach ($Task in $Tasks) {
+    Get-ScheduledTask -TaskPath $Task -EA SilentlyContinue | Enable-ScheduledTask -EA SilentlyContinue
+}
+Write-Host "[OK] Windows Update restored to defaults"
+'''
+    return run_ps(script, cb)
+
+def set_updates_security_only(cb=None):
+    """WinUtil: Invoke-WPFUpdatessecurity — defer feature updates 365 days, quality 0 days"""
+    if cb: cb("[INFO] Setting Windows Update to security only (WinUtil-verified)...")
+    script = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+$registryPath    = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+$AUregistryPath  = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+If (!(Test-Path $registryPath)) { New-Item -Path $registryPath -Force | Out-Null }
+If (!(Test-Path $AUregistryPath)) { New-Item -Path $AUregistryPath -Force | Out-Null }
+# Defer feature updates by 365 days, quality updates by 0
+Set-ItemProperty $registryPath -Name "DeferQualityUpdates"             -Value 1 -Type DWord -Force
+Set-ItemProperty $registryPath -Name "DeferQualityUpdatesPeriodInDays" -Value 0 -Type DWord -Force
+Set-ItemProperty $registryPath -Name "DeferFeatureUpdates"             -Value 1 -Type DWord -Force
+Set-ItemProperty $registryPath -Name "DeferFeatureUpdatesPeriodInDays" -Value 365 -Type DWord -Force
+Set-ItemProperty $registryPath -Name "ExcludeWUDriversInQualityUpdate" -Value 1 -Type DWord -Force
+Set-ItemProperty $AUregistryPath -Name "NoAutoUpdate" -Value 0 -Type DWord -Force
+Set-ItemProperty $AUregistryPath -Name "AUOptions"    -Value 3 -Type DWord -Force
+Write-Host "[OK] Windows Update set to Security Only (feature updates deferred 365 days)"
+'''
+    return run_ps(script, cb)
+
+def set_updates_disable(cb=None):
+    """WinUtil: Invoke-WPFUpdatesdisable — disables BITS/wuauserv/UsoSvc, clears SoftwareDistribution, disables tasks"""
+    if cb: cb("[INFO] Disabling Windows Update (WinUtil-verified)...")
+    script = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+# Registry
+New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force | Out-Null
+Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Type DWord -Value 1 -Force
+Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "AUOptions"    -Type DWord -Value 1 -Force
+New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config" -Force | Out-Null
+Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config" -Name "DODownloadMode" -Type DWord -Value 0 -Force
+# Disable services
+Set-Service -Name BITS     -StartupType Disabled
+Set-Service -Name wuauserv -StartupType Disabled
+Set-Service -Name UsoSvc   -StartupType Disabled
+# Clear SoftwareDistribution cache
+Remove-Item "C:\Windows\SoftwareDistribution\*" -Recurse -Force -EA SilentlyContinue
+Write-Host "[INFO] Cleared SoftwareDistribution folder"
+# Disable update scheduled tasks
+$Tasks = '\Microsoft\Windows\InstallService\*','\Microsoft\Windows\UpdateOrchestrator\*','\Microsoft\Windows\UpdateAssistant\*','\Microsoft\Windows\WaaSMedic\*','\Microsoft\Windows\WindowsUpdate\*','\Microsoft\WindowsUpdate\*'
+foreach ($Task in $Tasks) {
+    Get-ScheduledTask -TaskPath $Task -EA SilentlyContinue | Disable-ScheduledTask -EA SilentlyContinue
+}
+Write-Host "[OK] Windows Update disabled (services + registry + tasks)"
+Write-Host "[WARN] Reboot recommended for all changes to take effect"
+'''
+    return run_ps(script, cb)
+
+
+# ─────────────────────────── REGISTRY HEALTH ────────────────────────
+def scan_broken_uninstall(cb=None):
+    if cb: cb("[INFO] Scanning for broken uninstall entries...")
+    script = r'''
+$paths = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+)
+$broken = @()
+foreach ($base in $paths) {
+    if(!(Test-Path $base)){continue}
+    Get-ChildItem $base -EA SilentlyContinue | ForEach-Object {
+        $props = Get-ItemProperty $_.PSPath -EA SilentlyContinue
+        $unst  = $props.UninstallString
+        $name  = $props.DisplayName
+        if ($name -and $unst) {
+            if ($unst -match '^"?([A-Za-z]:[^"]+\.exe)"?') {
+                $exe = $Matches[1]
+                if (!(Test-Path $exe)) {
+                    $broken += "$name | $exe"
+                    Write-Host "[BROKEN] $name"
+                }
+            }
+        }
     }
-    $info["partitions"] = $volList -join " | "
+}
+if($broken.Count -eq 0){Write-Host "[OK] No broken uninstall entries found"}
+else{Write-Host "[WARN] Found $($broken.Count) broken entries — run clean to remove"}
+'''
+    return run_ps(script, cb)
 
-    # Motherboard
-    $mb = Get-CimInstance Win32_BaseBoard
-    $info["motherboard"] = "$($mb.Manufacturer) $($mb.Product)"
-
-    # BIOS
-    $bios = Get-CimInstance Win32_BIOS
-    $info["bios"] = "$($bios.Manufacturer) $($bios.SMBIOSBIOSVersion)"
-
-    # Secure Boot
-    try {
-        $sb = Confirm-SecureBootUEFI
-        $info["secure_boot"] = if ($sb) { "Enabled" } else { "Disabled" }
-    } catch { $info["secure_boot"] = "Not supported / Legacy BIOS" }
-
-    # TPM
-    try {
-        $tpm = Get-CimInstance -Namespace "root\cimv2\Security\MicrosoftTpm" -ClassName Win32_Tpm -EA Stop
-        $info["tpm"] = "v$($tpm.SpecVersion.Split(',')[0]) - Present"
-    } catch { $info["tpm"] = "Not detected" }
-
-    # Network
-    $net = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
-    if ($net) {
-        $info["network_adapter"] = $net.Name
-        $info["network_speed"] = "$([math]::Round($net.LinkSpeed.Replace(' Gbps','').Replace(' Mbps',''),0)) $($net.LinkSpeed -replace '[0-9. ]','')"
-        $info["mac"] = $net.MacAddress
+def clean_broken_uninstall(cb=None):
+    if cb: cb("[INFO] Cleaning broken uninstall entries (backing up first)...")
+    script = r'''
+$backup = "$env:USERPROFILE\Desktop\WinForge_Registry_Backup_$(Get-Date -f 'yyyyMMdd_HHmmss').reg"
+reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" $backup /y | Out-Null
+Write-Host "[INFO] Backup saved to $backup"
+$paths = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+)
+$removed = 0
+foreach ($base in $paths) {
+    if(!(Test-Path $base)){continue}
+    Get-ChildItem $base -EA SilentlyContinue | ForEach-Object {
+        $props = Get-ItemProperty $_.PSPath -EA SilentlyContinue
+        $unst  = $props.UninstallString
+        $name  = $props.DisplayName
+        if ($name -and $unst) {
+            if ($unst -match '^"?([A-Za-z]:[^"]+\.exe)"?') {
+                if (!(Test-Path $Matches[1])) {
+                    Remove-Item $_.PSPath -Recurse -Force -EA SilentlyContinue
+                    $removed++
+                    Write-Host "[OK] Removed: $name"
+                }
+            }
+        }
     }
+}
+Write-Host "[OK] Cleaned $removed broken uninstall entries"
+'''
+    return run_ps(script, cb)
 
-    # Uptime
-    $uptime = (Get-Date) - $os.LastBootUpTime
-    $info["uptime"] = "$($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m"
 
-    # Windows Defender
-    try {
-        $def = Get-MpComputerStatus -EA Stop
-        $info["defender"] = if ($def.AntivirusEnabled) { "Enabled" } else { "Disabled" }
-        $info["defender_updated"] = $def.AntivirusSignatureLastUpdated.ToString("yyyy-MM-dd HH:mm")
-    } catch { $info["defender"] = "Unknown" }
-
-    # Power Plan
-    $plan = powercfg /getactivescheme
-    $info["power_plan"] = ($plan -replace "Power Scheme GUID: [a-f0-9-]+ +\(","" -replace "\)","").Trim()
-
-    # Output as KEY=VALUE
-    foreach ($k in $info.Keys | Sort-Object) {
-        Write-Host "SYSINFO:$k=$($info[$k])"
-    }
-    '''
-    s, o = run_ps(cmd, cb)
-    result = {}
-    for line in o.split("\n"):
-        if line.startswith("SYSINFO:"):
-            parts = line[8:].split("=", 1)
-            if len(parts) == 2:
-                result[parts[0]] = parts[1]
-    return result
+# ─────────────────────────── RESTORE POINTS ─────────────────────────
+def create_restore_point(description: str = "WinForge Manual Restore Point", cb=None):
+    if cb: cb(f"[INFO] Creating restore point: {description}...")
+    script = f'''
+Enable-ComputerRestore -Drive "C:\\" -EA SilentlyContinue
+# Bypass 24h limit
+$key = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore"
+Set-ItemProperty $key -Name SystemRestorePointCreationFrequency -Value 0 -Type DWord -Force -EA SilentlyContinue
+Checkpoint-Computer -Description "{description}" -RestorePointType MODIFY_SETTINGS -EA Stop
+Write-Host "[OK] Restore point created: {description}"
+'''
+    return run_ps(script, cb)
