@@ -158,9 +158,10 @@ class WinForgeApp(ctk.CTk):
         threading.Thread(target=fetch,daemon=True).start()
 
     def _render_sysinfo(s,p,info):
-        # Remove loading card
-        for w in p.winfo_children():
-            if w != p.winfo_children()[0]: w.destroy()  # keep header
+        # Clear everything except header
+        children = p.winfo_children()
+        for w in children[1:]: w.destroy()
+
         sections=[
             ("Operating System",[
                 ("OS",info.get("os_name","Unknown")),
@@ -208,16 +209,22 @@ class WinForgeApp(ctk.CTk):
             ]),
         ]
         row=1
+        LABEL_W = 180
         for sect_name,fields in sections:
-            cd=s._crd(p,row,py=(0,4)); row+=1
-            ctk.CTkLabel(cd,text=sect_name,font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=ACCENT).grid(row=0,column=0,columnspan=2,padx=12,pady=(8,4),sticky="w")
+            cd=ctk.CTkFrame(p,fg_color=CARD,corner_radius=8)
+            cd.grid(row=row,column=0,sticky="ew",pady=(0,4)); row+=1
+            cd.grid_columnconfigure(0,minsize=LABEL_W)
             cd.grid_columnconfigure(1,weight=1)
+            ctk.CTkLabel(cd,text=sect_name,font=ctk.CTkFont(family=FONT,size=13,weight="bold"),text_color=ACCENT).grid(row=0,column=0,columnspan=2,padx=12,pady=(8,2),sticky="w")
             for fi,(label,value) in enumerate(fields,1):
-                ctk.CTkLabel(cd,text=label,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT3).grid(row=fi,column=0,padx=(12,8),pady=1,sticky="w")
-                ctk.CTkLabel(cd,text=value,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT,wraplength=600,justify="left").grid(row=fi,column=1,padx=(0,12),pady=1,sticky="w")
-            ctk.CTkFrame(cd,fg_color=CARD,height=4).grid(row=99,column=0,columnspan=2,sticky="ew")
+                ctk.CTkLabel(cd,text=label,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT3,anchor="w").grid(row=fi,column=0,padx=(20,0),pady=2,sticky="w")
+                ctk.CTkLabel(cd,text=value,font=ctk.CTkFont(family=FONT,size=11),text_color=TXT,anchor="w",wraplength=550,justify="left").grid(row=fi,column=1,padx=(0,12),pady=2,sticky="w")
+            ctk.CTkFrame(cd,fg_color=CARD,height=6).grid(row=99,column=0,columnspan=2,sticky="ew")
 
-        # Copy to clipboard button
+        # Bind scroll to all children so scrolling works over cards
+        s._bind_scroll_recursive(p)
+
+        # Copy button
         def copy_all():
             text=[]
             for sect_name,fields in sections:
@@ -227,6 +234,16 @@ class WinForgeApp(ctk.CTk):
             s.clipboard_clear(); s.clipboard_append("\n".join(text))
             s._log("[OK] System info copied to clipboard.")
         ctk.CTkButton(p,text="Copy to Clipboard",font=ctk.CTkFont(family=FONT,size=12,weight="bold"),fg_color=ACCENT,hover_color=ACCENT2,text_color="#fff",corner_radius=7,height=34,width=160,command=copy_all).grid(row=row,column=0,pady=(6,4),sticky="w")
+
+    def _bind_scroll_recursive(s, widget):
+        """Bind mousewheel to all children so scrolling works over cards inside ScrollableFrame."""
+        try:
+            for child in widget.winfo_children():
+                child.bind("<MouseWheel>", lambda e: s._tab._parent_canvas.yview_scroll(-int(e.delta/120), "units"), add="+")
+                child.bind("<Button-4>", lambda e: s._tab._parent_canvas.yview_scroll(-1, "units"), add="+")
+                child.bind("<Button-5>", lambda e: s._tab._parent_canvas.yview_scroll(1, "units"), add="+")
+                s._bind_scroll_recursive(child)
+        except: pass
 
     # ─── REPAIR ───────────────────────────────────────────────────────────────
     def _t_repair(s,p):
