@@ -886,7 +886,6 @@ class WinForge(ctk.CTk):
         self._build_layout()
         self._build_nav()
         self._build_log()
-        self._build_toast_area()
         self._show_tab("System Info")
 
     # ─── Layout skeleton ─────────────────────────────────────────
@@ -895,10 +894,10 @@ class WinForge(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
 
         # Sidebar
-        self._sidebar = ctk.CTkFrame(self, width=190, fg_color=PANEL, corner_radius=0)
+        self._sidebar = ctk.CTkFrame(self, width=200, fg_color=PANEL, corner_radius=0)
         self._sidebar.grid(row=0, column=0, rowspan=2, sticky="nsw")
         self._sidebar.grid_propagate(False)
-        self._sidebar.grid_rowconfigure(20, weight=1)
+        self._sidebar.grid_rowconfigure(14, weight=1)
 
         # Main area
         self._main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
@@ -908,9 +907,11 @@ class WinForge(ctk.CTk):
 
     def _build_nav(self):
         ctk.CTkLabel(self._sidebar, text="WinForge",
-            font=ctk.CTkFont(family=FONT, size=20, weight="bold"),
-            text_color=ACCENT).grid(row=0, column=0, padx=16, pady=(18,14), sticky="w")
+            font=ctk.CTkFont(family=FONT, size=18, weight="bold"),
+            text_color=ACCENT).grid(row=0, column=0, padx=14, pady=(16,10), sticky="w")
 
+        sep = ctk.CTkFrame(self._sidebar, height=1, fg_color=BORDER)
+        sep.grid(row=1, column=0, sticky="ew", padx=10, pady=(0,8))
 
         self._nav_btns = {}
         tabs = [
@@ -932,7 +933,7 @@ class WinForge(ctk.CTk):
                 fg_color="transparent", hover_color=HOVER, text_color=TEXT2,
                 corner_radius=6, height=34,
                 command=lambda n=name: self._show_tab(n))
-            btn.grid(row=i+1, column=0, padx=8, pady=1, sticky="ew")
+            btn.grid(row=i+2, column=0, padx=8, pady=1, sticky="ew")
             self._nav_btns[name] = btn
 
     def _build_log(self):
@@ -977,12 +978,6 @@ class WinForge(ctk.CTk):
         else:
             self._logbox_container.grid_remove()
             self._log_toggle_btn.configure(text="▶  Output Log")
-
-    def _build_toast_area(self):
-        # Use place() so toasts always float above content regardless of grid rows
-        self._toast_overlay = ctk.CTkFrame(self, fg_color="transparent", width=360)
-        self._toast_overlay.place(relx=1.0, rely=1.0, anchor="se", x=-20, y=-20)
-        self._toast_overlay.lift()
 
     def _log_line(self, msg: str):
         def _write():
