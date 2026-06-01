@@ -1,7 +1,5 @@
 # WinForge v4.0 — Windows Toolkit
 
-All tweaks use WinUtil-aligned backend commands for stability and correctness.
-
 ## Features
 - System Repair (DISM, SFC, CHKDSK)
 - Cleanup (grid layout)
